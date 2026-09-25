@@ -1,9 +1,11 @@
 import './styles.css';
 import type { VRM } from '@pixiv/three-vrm';
 import { Avatar } from './avatar/Avatar';
+import { AvatarController } from './avatar/AvatarController';
 import { AvatarDebugPanel } from './avatar/AvatarDebugPanel';
 import { AvatarIdleController } from './avatar/AvatarIdleController';
 import { AvatarLoader } from './avatar/AvatarLoader';
+import type { AvatarState } from './avatar/AvatarStateProfiles';
 import { MAX_FRAME_DELTA, MODEL_URL, REST_POSE } from './config';
 import { DebugOverlay } from './debug/DebugOverlay';
 import { AvatarStage } from './renderer/AvatarStage';
@@ -16,6 +18,9 @@ export interface AvatarDebugApi {
   avatar: Avatar | null;
   idle: AvatarIdleController;
   stage: AvatarStage;
+  controller: AvatarController | null;
+  /** Live getter: current conversation state, or null before the avatar is loaded. */
+  readonly state: AvatarState | null;
 }
 
 declare global {
@@ -36,19 +41,27 @@ const idle = new AvatarIdleController();
 const overlay = new DebugOverlay(document.body, stage.renderer, { loaded: false, vrmVersion: null, webgl2: stage.isWebGL2 });
 overlay.visible = import.meta.env.DEV;
 
-let avatar: Avatar | null = null;
+let controller: AvatarController | null = null;
 let panel: AvatarDebugPanel | null = null;
 let errorBanner: HTMLElement | null = null;
 
-const debugApi: AvatarDebugApi = { loaded: false, error: null, fps: 0, avatar: null, idle, stage };
+const debugApi: AvatarDebugApi = {
+  loaded: false,
+  error: null,
+  fps: 0,
+  avatar: null,
+  idle,
+  stage,
+  controller: null,
+  get state() {
+    return controller?.getState() ?? null;
+  },
+};
 if (import.meta.env.DEV) window.__AVATAR_DEBUG__ = debugApi;
 
-// Single rAF loop: idle → avatar/VRM → render.
+// Single rAF loop: controller (state → idle → composition → avatar/VRM) → render.
 const loop = new RenderLoop((delta) => {
-  if (avatar) {
-    idle.update(delta);
-    avatar.update(delta);
-  }
+  controller?.update(delta);
   stage.render();
   overlay.afterRender(delta);
   debugApi.fps = overlay.meter.fps;
@@ -65,20 +78,23 @@ async function boot(): Promise<void> {
     const vrm = hot?.vrm ?? (await new AvatarLoader().loadVRM(MODEL_URL));
     if (hot) hot.vrm = vrm;
 
-    avatar = new Avatar(vrm, { restPose: REST_POSE });
-    idle.setSink(avatar);
-    idle.update(0);
-    avatar.update(0);
-    stage.setAvatar(avatar);
+    const ctrl = new AvatarController({ avatar: new Avatar(vrm, { restPose: REST_POSE }), idle });
+    ctrl.update(0);
+    stage.setAvatar(ctrl.avatar);
 
-    panel = new AvatarDebugPanel(avatar, idle, {
+    document.body.dataset.avatarState = ctrl.getState();
+    ctrl.onStateChange((state) => (document.body.dataset.avatarState = state));
+    controller = ctrl;
+
+    panel = new AvatarDebugPanel(ctrl, {
       overlayVisible: overlay.visible,
       setOverlayVisible: (v) => (overlay.visible = v),
     });
 
-    overlay.setInfo({ loaded: true, vrmVersion: formatVrmVersion(avatar.vrmVersion) });
+    overlay.setInfo({ loaded: true, vrmVersion: formatVrmVersion(ctrl.avatar.vrmVersion) });
     debugApi.loaded = true;
-    debugApi.avatar = avatar;
+    debugApi.avatar = ctrl.avatar;
+    debugApi.controller = ctrl;
     document.body.dataset.avatarLoaded = 'true';
   } catch (error) {
     reportError(error);
@@ -108,6 +124,7 @@ if (import.meta.hot) {
   import.meta.hot.accept();
   import.meta.hot.dispose(() => {
     loop.stop();
+    controller?.dispose();
     panel?.dispose();
     overlay.dispose();
     errorBanner?.remove();

@@ -39,6 +39,8 @@ export interface ProceduralPose {
   headRoll: number;
   /** Breathing phase, roughly [-1, 1] scaled by intensity. */
   breath: number;
+  /** Upper-body forward lean, radians (positive = towards the camera). Split over spine and chest. */
+  lean: number;
   /** Procedural eyelid closure, [0, 1]. Combined with manual blink via max(). */
   blink: number;
   /** Gaze offset from the look target, degrees. */
@@ -51,6 +53,7 @@ export const EMPTY_PROCEDURAL_POSE: Readonly<ProceduralPose> = Object.freeze({
   headPitch: 0,
   headRoll: 0,
   breath: 0,
+  lean: 0,
   blink: 0,
   gazeYaw: 0,
   gazePitch: 0,
@@ -77,6 +80,12 @@ const BREATH = {
   shoulderLift: 0.018,
 } as const;
 
+/** How the lean offset is distributed over the spine chain (fractions sum to 1). */
+const LEAN = {
+  spine: 0.6,
+  chest: 0.4,
+} as const;
+
 const BLINK_EXPRESSION = 'blink';
 
 interface DrivenBone {
@@ -90,7 +99,7 @@ interface DrivenBone {
  *
  * Two layers are composed once per frame in update():
  *  - manual: set via setExpression / setBoneRotation (debug UI, future controllers)
- *  - procedural: set via setProcedural (idle controller)
+ *  - procedural: set via setProcedural (AvatarController: idle + conversation state)
  */
 export class Avatar {
   private readonly vrm: AvatarRuntime;
@@ -249,6 +258,7 @@ export class Avatar {
     p.headPitch = pose.headPitch;
     p.headRoll = pose.headRoll;
     p.breath = pose.breath;
+    p.lean = pose.lean;
     p.blink = clamp01(pose.blink);
     p.gazeYaw = pose.gazeYaw;
     p.gazePitch = pose.gazePitch;
@@ -308,10 +318,10 @@ export class Avatar {
           e.x += p.breath * BREATH.neckPitch;
           break;
         case 'chest':
-          e.x += p.breath * BREATH.chestPitch;
+          e.x += p.breath * BREATH.chestPitch + p.lean * LEAN.chest;
           break;
         case 'spine':
-          e.x += p.breath * BREATH.spinePitch;
+          e.x += p.breath * BREATH.spinePitch + p.lean * LEAN.spine;
           break;
         case 'leftShoulder':
           e.z += p.breath * BREATH.shoulderLift;
