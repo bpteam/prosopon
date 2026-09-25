@@ -1,4 +1,4 @@
-# Avatar sandbox (US-001)
+# Avatar sandbox (US-001, US-002)
 
 Standalone browser sandbox for developing the VRM avatar renderer. It has no dependencies on ChatGPT or Chrome Extension APIs.
 
@@ -23,16 +23,43 @@ src/
 │   ├── AvatarStage.ts          scene / camera / renderer / lights / resize / framing
 │   └── RenderLoop.ts           the only requestAnimationFrame, clamped delta
 ├── avatar/
+│   ├── AvatarController.ts     public API of the subsystem: conversation state, manual proxies, update()
+│   ├── ConversationStateMachine.ts  idle/listening/thinking/speaking + delta-time profile blending
+│   ├── AvatarStateProfiles.ts  per-state profiles (multipliers/offsets), transition duration
+│   ├── BehaviorMixer.ts        merges idle pose + state profile into the one ProceduralPose
 │   ├── Avatar.ts               engine-facing API over a VRM: expressions, bones, transform, gaze
 │   ├── AvatarLoader.ts         GLTFLoader + VRMLoaderPlugin + VRMUtils optimisations
 │   ├── AvatarIdleController.ts procedural idle: breathing, blink, head micro-motion, gaze
-│   └── AvatarDebugPanel.ts     lil-gui, talks only to Avatar / AvatarIdleController
+│   └── AvatarDebugPanel.ts     lil-gui, talks only to AvatarController
 └── debug/
     ├── DebugOverlay.ts         FPS, frame time, VRM state, WebGL version, triangles, draw calls
     └── FpsMeter.ts
 ```
 
-Frame order: `delta → idle.update(delta) → avatar.update(delta) [applies layers, vrm.update] → renderer.render()`.
+Frame order: `delta → controller.update(delta) → renderer.render()`, where `controller.update` is
+`state transition → idle.update → BehaviorMixer.compose → avatar.setProcedural → avatar.update [layers, vrm.update]`.
+
+### Conversation state
+
+`AvatarController` is what application code and future providers use. It has no dependency on ChatGPT,
+Chrome Extension APIs or audio.
+
+```ts
+const controller = new AvatarController({ avatar, idle });
+controller.onStateChange((state, previous) => { /* ... */ }); // returns unsubscribe
+controller.setState('listening'); // idle | listening | thinking | speaking
+controller.update(delta);
+```
+
+- Each state is an `AvatarStateProfile` in `AvatarStateProfiles.ts`: multipliers for the idle head/gaze/breath
+  signal plus head/gaze/lean offsets. Profiles never touch expressions; conversation state is not emotion.
+- `setState` blends from the *current* (possibly mid-transition) profile to the target with a smoothstep over
+  `STATE_TRANSITION_DURATION` seconds of accumulated delta, so it is continuous and frame-rate independent.
+  Re-setting the current target state does nothing.
+- Blink is passed through from idle untouched, so a state change can't interrupt a blink or reset its timer.
+- `AvatarController` is the only caller of `Avatar.setProcedural()` (it detaches the idle sink). New sources
+  (audio, emotion, gestures) become inputs of `BehaviorMixer.compose()`, not additional writers.
+- `setIdleEnabled(false)` fades idle motion out; state posture/gaze offsets still apply.
 
 ### Pose layering
 
@@ -41,7 +68,7 @@ Frame order: `delta → idle.update(delta) → avatar.update(delta) [applies lay
 | layer      | written by                                           | composition                              |
 |------------|------------------------------------------------------|------------------------------------------|
 | manual     | `setExpression`, `setBoneRotation`, `setHeadRotation`| base value                               |
-| procedural | `setProcedural` (idle controller; later lip-sync)    | added to bones; `blink = max(manual, procedural)` |
+| procedural | `setProcedural` (AvatarController: idle × state)     | added to bones; `blink = max(manual, procedural)` |
 
 Because of the layering, debug sliders and idle motion don't overwrite each other. Rotations of bones that `Avatar` drives
 (head, neck, chest, spine, shoulders, and anything set via `setBoneRotation`) are rewritten every frame, so write
@@ -74,8 +101,10 @@ Exception: a change to `AvatarLoader.ts` only affects the next full reload, beca
 
 ## Dev API
 
-In dev mode, `window.__AVATAR_DEBUG__ = { loaded, error, fps, avatar, idle, stage }`. `<body data-avatar-loaded>`
-is `false` → `true`, or `error` (with `data-avatar-error`) if loading fails. Load errors also go to
+In dev mode, `window.__AVATAR_DEBUG__ = { loaded, error, fps, avatar, idle, stage, controller, state }`
+(`state` is a live getter; `controller`/`state` are `null` until the model is loaded). `<body data-avatar-loaded>`
+is `false` → `true`, or `error` (with `data-avatar-error`) if loading fails. `<body data-avatar-state>` mirrors
+the conversation state once the avatar is loaded. Load errors also go to
 `console.error` and show a banner on the page.
 
 ## Model

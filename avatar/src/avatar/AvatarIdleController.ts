@@ -122,6 +122,7 @@ export class AvatarIdleController {
       headPitch: 0,
       headRoll: 0,
       breath: 0,
+      lean: 0,
       blink: 0,
       blinkPhase: 'open',
       gazeYaw: 0,

@@ -25,7 +25,7 @@ test('sandbox loads and renders the VRM avatar', async ({ page }) => {
   // lil-gui panel with the expected sections
   const gui = page.getByTestId('debug-panel');
   await expect(gui).toBeVisible();
-  for (const folder of ['Head', 'Face', 'Blink', 'Mouth', 'Avatar', 'Idle']) {
+  for (const folder of ['Conversation State', 'Head', 'Face', 'Blink', 'Mouth', 'Avatar', 'Idle']) {
     await expect(gui.locator('.lil-title', { hasText: new RegExp(`^${folder}$`) })).toHaveCount(1);
   }
 
@@ -101,4 +101,26 @@ test('a failing model load is reported, not silent', async ({ page }) => {
   await expect(page.getByRole('alert')).toContainText('Avatar failed to load');
   expect(consoleErrors.some((e) => e.includes('failed to initialise'))).toBe(true);
   await expect(page.getByTestId('debug-overlay')).toContainText('VRM loaded  no');
+});
+
+test('conversation state is switched through the controller and mirrored in the DOM', async ({ page }) => {
+  const errors = collectErrors(page);
+  await page.goto('/');
+  await expect(page.locator('body')).toHaveAttribute('data-avatar-loaded', 'true');
+  await expect(page.locator('body')).toHaveAttribute('data-avatar-state', 'idle');
+  expect(await page.evaluate(() => window.__AVATAR_DEBUG__!.state)).toBe('idle');
+
+  for (const state of ['listening', 'thinking', 'speaking', 'idle'] as const) {
+    await page.evaluate((s) => window.__AVATAR_DEBUG__!.controller!.setState(s), state);
+    await expect(page.locator('body')).toHaveAttribute('data-avatar-state', state);
+    expect(await page.evaluate(() => window.__AVATAR_DEBUG__!.state)).toBe(state);
+    // The transition completes on the live render loop.
+    await expect.poll(() => page.evaluate(() => window.__AVATAR_DEBUG__!.controller!.isTransitioning)).toBe(false);
+  }
+
+  // The GUI dropdown drives the same controller.
+  await page.getByTestId('debug-panel').locator('select').first().selectOption('thinking');
+  await expect(page.locator('body')).toHaveAttribute('data-avatar-state', 'thinking');
+
+  expect(errors).toEqual([]);
 });
