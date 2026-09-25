@@ -24,7 +24,14 @@ export default defineConfig({
         launchOptions: {
           executablePath,
           // Software WebGL in headless environments without a GPU.
-          args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader'],
+          args: [
+            '--use-angle=swiftshader',
+            '--enable-unsafe-swiftshader',
+            // Lip sync e2e: fake microphone without a permission prompt, audio without a user gesture.
+            '--use-fake-device-for-media-stream',
+            '--use-fake-ui-for-media-stream',
+            '--autoplay-policy=no-user-gesture-required',
+          ],
         },
       },
     },

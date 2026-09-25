@@ -5,6 +5,15 @@ import type { AvatarState, AvatarStateProfile } from './AvatarStateProfiles';
 import { BehaviorMixer } from './BehaviorMixer';
 import { ConversationStateMachine, type ConversationStateMachineOptions } from './ConversationStateMachine';
 
+/**
+ * Anything that produces mouth openness once per frame (amplitude lip sync, later viseme analysers).
+ * Pulled by AvatarController.update(), so it runs on the render loop's delta.
+ */
+export interface MouthSource {
+  /** @returns mouth openness, [0, 1] */
+  update(deltaTime: number): number;
+}
+
 export type StateChangeListener = (state: AvatarState, previous: AvatarState) => void;
 
 export interface AvatarControllerApi {
@@ -16,6 +25,7 @@ export interface AvatarControllerApi {
   setHeadRotation(yaw: number, pitch: number, roll: number): boolean;
   setLookAtTarget(target: THREE.Object3D | null): void;
   setIdleEnabled(enabled: boolean): void;
+  setMouthSource(source: MouthSource | null): void;
 
   update(deltaTime: number): void;
 }
@@ -46,6 +56,7 @@ export class AvatarController implements AvatarControllerApi {
   private readonly mixer = new BehaviorMixer();
   private readonly listeners = new Set<StateChangeListener>();
   private readonly onListenerError: (error: unknown) => void;
+  private mouthSource: MouthSource | null = null;
 
   constructor(options: AvatarControllerOptions) {
     this.avatar = options.avatar;
@@ -133,12 +144,20 @@ export class AvatarController implements AvatarControllerApi {
     this.idle.triggerBlink();
   }
 
+  // --- Lip sync --------------------------------------------------------------
+
+  /** Source of procedural mouth openness; null closes the procedural mouth (manual "aa" still applies). */
+  setMouthSource(source: MouthSource | null): void {
+    this.mouthSource = source;
+  }
+
   // --- Frame -----------------------------------------------------------------
 
   update(deltaTime: number): void {
     const profile = this.machine.update(deltaTime);
     const idlePose = this.idle.update(deltaTime);
-    this.avatar.setProcedural(this.mixer.compose(idlePose, profile));
+    const mouth = this.mouthSource?.update(deltaTime) ?? 0;
+    this.avatar.setProcedural(this.mixer.compose(idlePose, profile, mouth));
     this.avatar.update(deltaTime);
   }
 

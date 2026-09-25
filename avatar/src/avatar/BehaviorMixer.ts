@@ -4,8 +4,8 @@ import type { AvatarStateProfile } from './AvatarStateProfiles';
 /**
  * The single place where behaviour sources are merged into the one ProceduralPose that Avatar receives.
  *
- * Current sources: idle (base signal) and conversation state (scales and biases it).
- * Future sources (audio → mouth, emotion → expressions/posture, gestures) are added here as further
+ * Current sources: idle (base signal), conversation state (scales and biases it) and mouth (lip sync).
+ * Future sources (emotion → expressions/posture, gestures) are added here as further
  * inputs of compose(), never as additional writers of Avatar.setProcedural().
  */
 export class BehaviorMixer {
@@ -16,7 +16,7 @@ export class BehaviorMixer {
     return this.out;
   }
 
-  compose(idle: Readonly<ProceduralPose>, state: Readonly<AvatarStateProfile>): Readonly<ProceduralPose> {
+  compose(idle: Readonly<ProceduralPose>, state: Readonly<AvatarStateProfile>, mouthOpen = 0): Readonly<ProceduralPose> {
     const o = this.out;
     const head = state.headMotionMultiplier;
     o.headYaw = idle.headYaw * head + state.headYawOffset;
@@ -32,6 +32,9 @@ export class BehaviorMixer {
     const gaze = state.gazeMotionMultiplier;
     o.gazeYaw = idle.gazeYaw * gaze + state.gazeYawOffset;
     o.gazePitch = idle.gazePitch * gaze + state.gazePitchOffset;
+
+    // Mouth is owned by lip sync; neither idle nor state has an opinion about it.
+    o.mouthOpen = mouthOpen;
     return o;
   }
 }

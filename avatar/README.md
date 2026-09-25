@@ -1,4 +1,4 @@
-# Avatar sandbox (US-001, US-002)
+# Avatar sandbox (US-001, US-002, US-003)
 
 Standalone browser sandbox for developing the VRM avatar renderer. It has no dependencies on ChatGPT or Chrome Extension APIs.
 
@@ -11,7 +11,8 @@ npm run typecheck
 ```
 
 Playwright needs Chromium: run `npx playwright install chromium` once, or point it at an existing binary
-with `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/path/to/chrome npm run test:e2e`.
+with `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/path/to/chrome npm run test:e2e`. The lip sync e2e tests use Chromium's
+fake capture device and disable the autoplay gesture requirement (see `playwright.config.ts`).
 
 ## Architecture
 
@@ -31,13 +32,17 @@ src/
 │   ├── AvatarLoader.ts         GLTFLoader + VRMLoaderPlugin + VRMUtils optimisations
 │   ├── AvatarIdleController.ts procedural idle: breathing, blink, head micro-motion, gaze
 │   └── AvatarDebugPanel.ts     lil-gui, talks only to AvatarController
+├── audio/
+│   ├── AudioInput.ts           file / mic / test signal / external node → AnalyserNode, readRms()
+│   ├── AmplitudeLipSync.ts     RMS → dB → mouth openness, attack/release follower (a MouthSource)
+│   └── LipSyncDebugPanel.ts    "Lip Sync" GUI folder: sources, mapping, live level
 └── debug/
     ├── DebugOverlay.ts         FPS, frame time, VRM state, WebGL version, triangles, draw calls
     └── FpsMeter.ts
 ```
 
 Frame order: `delta → controller.update(delta) → renderer.render()`, where `controller.update` is
-`state transition → idle.update → BehaviorMixer.compose → avatar.setProcedural → avatar.update [layers, vrm.update]`.
+`state transition → idle.update → mouthSource.update → BehaviorMixer.compose → avatar.setProcedural → avatar.update [layers, vrm.update]`.
 
 ### Conversation state
 
@@ -61,6 +66,26 @@ controller.update(delta);
   (audio, emotion, gestures) become inputs of `BehaviorMixer.compose()`, not additional writers.
 - `setIdleEnabled(false)` fades idle motion out; state posture/gaze offsets still apply.
 
+### Lip sync (amplitude fallback)
+
+```ts
+const audio = new AudioInput();
+const lipSync = new AmplitudeLipSync(() => audio.readRms());
+controller.setMouthSource(lipSync);         // anything with update(delta): number works
+await audio.playFile(file);                 // or startMic(), startTestSignal(), connectNode(ttsNode)
+```
+
+- Pull model: `AvatarController.update` calls `mouthSource.update(delta)` once per frame, `AmplitudeLipSync` reads the
+  RMS of the analyser's current window (`fftSize` 1024 ≈ 21 ms). No audio callbacks, no second clock.
+- Level is mapped linearly in dBFS between `noiseFloorDb` (closed, doubles as a noise gate) and `fullOpenDb`, times
+  `maxOpen`, then smoothed by a one-pole follower with `attack`/`release` time constants. The step is
+  `target + (v − target)·e^(−Δt/τ)`, exact for piecewise-constant input, so it is frame-rate independent.
+- The result goes into `ProceduralPose.mouthOpen` and drives the `aa` preset as `max(manual, procedural)`; other
+  visemes stay manual. Viseme analysis (US-003 step 2) replaces the source, not the plumbing.
+- Routing: file/test signal are audible, mic and external nodes are only analysed (no feedback). The mic is opened
+  with `autoGainControl: false`, because AGC flattens the dynamics amplitude lip sync relies on.
+- The AudioContext is created on the first start call, so start sources from a user gesture (autoplay policy).
+
 ### Pose layering
 
 `Avatar` composes two layers once per frame:
@@ -68,7 +93,7 @@ controller.update(delta);
 | layer      | written by                                           | composition                              |
 |------------|------------------------------------------------------|------------------------------------------|
 | manual     | `setExpression`, `setBoneRotation`, `setHeadRotation`| base value                               |
-| procedural | `setProcedural` (AvatarController: idle × state)     | added to bones; `blink = max(manual, procedural)` |
+| procedural | `setProcedural` (AvatarController: idle × state + mouth) | added to bones; `blink`/`aa` = `max(manual, procedural)` |
 
 Because of the layering, debug sliders and idle motion don't overwrite each other. Rotations of bones that `Avatar` drives
 (head, neck, chest, spine, shoulders, and anything set via `setBoneRotation`) are rewritten every frame, so write
@@ -101,7 +126,7 @@ Exception: a change to `AvatarLoader.ts` only affects the next full reload, beca
 
 ## Dev API
 
-In dev mode, `window.__AVATAR_DEBUG__ = { loaded, error, fps, avatar, idle, stage, controller, state }`
+In dev mode, `window.__AVATAR_DEBUG__ = { loaded, error, fps, avatar, idle, stage, controller, audio, lipSync, state }`
 (`state` is a live getter; `controller`/`state` are `null` until the model is loaded). `<body data-avatar-loaded>`
 is `false` → `true`, or `error` (with `data-avatar-error`) if loading fails. `<body data-avatar-state>` mirrors
 the conversation state once the avatar is loaded. Load errors also go to

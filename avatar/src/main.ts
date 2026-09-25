@@ -6,6 +6,9 @@ import { AvatarDebugPanel } from './avatar/AvatarDebugPanel';
 import { AvatarIdleController } from './avatar/AvatarIdleController';
 import { AvatarLoader } from './avatar/AvatarLoader';
 import type { AvatarState } from './avatar/AvatarStateProfiles';
+import { AmplitudeLipSync } from './audio/AmplitudeLipSync';
+import { AudioInput } from './audio/AudioInput';
+import { LipSyncDebugPanel } from './audio/LipSyncDebugPanel';
 import { MAX_FRAME_DELTA, MODEL_URL, REST_POSE } from './config';
 import { DebugOverlay } from './debug/DebugOverlay';
 import { AvatarStage } from './renderer/AvatarStage';
@@ -19,6 +22,8 @@ export interface AvatarDebugApi {
   idle: AvatarIdleController;
   stage: AvatarStage;
   controller: AvatarController | null;
+  audio: AudioInput;
+  lipSync: AmplitudeLipSync;
   /** Live getter: current conversation state, or null before the avatar is loaded. */
   readonly state: AvatarState | null;
 }
@@ -38,11 +43,14 @@ if (!container) throw new Error('#stage element is missing');
 
 const stage = new AvatarStage(container);
 const idle = new AvatarIdleController();
+const audio = new AudioInput();
+const lipSync = new AmplitudeLipSync(() => audio.readRms());
 const overlay = new DebugOverlay(document.body, stage.renderer, { loaded: false, vrmVersion: null, webgl2: stage.isWebGL2 });
 overlay.visible = import.meta.env.DEV;
 
 let controller: AvatarController | null = null;
 let panel: AvatarDebugPanel | null = null;
+let lipSyncPanel: LipSyncDebugPanel | null = null;
 let errorBanner: HTMLElement | null = null;
 
 const debugApi: AvatarDebugApi = {
@@ -53,13 +61,15 @@ const debugApi: AvatarDebugApi = {
   idle,
   stage,
   controller: null,
+  audio,
+  lipSync,
   get state() {
     return controller?.getState() ?? null;
   },
 };
 if (import.meta.env.DEV) window.__AVATAR_DEBUG__ = debugApi;
 
-// Single rAF loop: controller (state → idle → composition → avatar/VRM) → render.
+// Single rAF loop: controller (state → idle → lip sync → composition → avatar/VRM) → render.
 const loop = new RenderLoop((delta) => {
   controller?.update(delta);
   stage.render();
@@ -79,6 +89,7 @@ async function boot(): Promise<void> {
     if (hot) hot.vrm = vrm;
 
     const ctrl = new AvatarController({ avatar: new Avatar(vrm, { restPose: REST_POSE }), idle });
+    ctrl.setMouthSource(lipSync);
     ctrl.update(0);
     stage.setAvatar(ctrl.avatar);
 
@@ -90,6 +101,7 @@ async function boot(): Promise<void> {
       overlayVisible: overlay.visible,
       setOverlayVisible: (v) => (overlay.visible = v),
     });
+    lipSyncPanel = new LipSyncDebugPanel(panel.gui, audio, lipSync);
 
     overlay.setInfo({ loaded: true, vrmVersion: formatVrmVersion(ctrl.avatar.vrmVersion) });
     debugApi.loaded = true;
@@ -125,7 +137,9 @@ if (import.meta.hot) {
   import.meta.hot.dispose(() => {
     loop.stop();
     controller?.dispose();
+    lipSyncPanel?.dispose();
     panel?.dispose();
+    void audio.dispose();
     overlay.dispose();
     errorBanner?.remove();
     stage.dispose();
