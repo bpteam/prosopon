@@ -1,4 +1,4 @@
-import { EMPTY_PROCEDURAL_POSE, type ProceduralPose } from './Avatar';
+import { EMPTY_PROCEDURAL_POSE, type MouthShape, type ProceduralPose } from './Avatar';
 import type { AvatarStateProfile } from './AvatarStateProfiles';
 
 /**
@@ -16,7 +16,12 @@ export class BehaviorMixer {
     return this.out;
   }
 
-  compose(idle: Readonly<ProceduralPose>, state: Readonly<AvatarStateProfile>, mouthOpen = 0): Readonly<ProceduralPose> {
+  /** @param mouth lip sync output: openness on "aa", or a weight per viseme preset */
+  compose(
+    idle: Readonly<ProceduralPose>,
+    state: Readonly<AvatarStateProfile>,
+    mouth: number | Readonly<MouthShape> = 0,
+  ): Readonly<ProceduralPose> {
     const o = this.out;
     const head = state.headMotionMultiplier;
     o.headYaw = idle.headYaw * head + state.headYawOffset;
@@ -34,7 +39,16 @@ export class BehaviorMixer {
     o.gazePitch = idle.gazePitch * gaze + state.gazePitchOffset;
 
     // Mouth is owned by lip sync; neither idle nor state has an opinion about it.
-    o.mouthOpen = mouthOpen;
+    if (typeof mouth === 'number') {
+      o.aa = mouth;
+      o.ih = o.ou = o.ee = o.oh = 0;
+    } else {
+      o.aa = mouth.aa;
+      o.ih = mouth.ih;
+      o.ou = mouth.ou;
+      o.ee = mouth.ee;
+      o.oh = mouth.oh;
+    }
     return o;
   }
 }

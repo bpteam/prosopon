@@ -25,10 +25,11 @@ function syllableWav(seconds: number, sampleRate = 16_000): Buffer {
   return buf;
 }
 
-async function loaded(page: Page) {
+/** Amplitude tests pin `analyzer=none`: the viseme analysers pick the shape, not the "aa" these tests measure. */
+async function loaded(page: Page, url = '/?analyzer=none') {
   const errors: string[] = [];
   page.on('pageerror', (err) => errors.push(err.message));
-  await page.goto('/');
+  await page.goto(url);
   await expect(page.locator('body')).toHaveAttribute('data-avatar-loaded', 'true');
   return errors;
 }
@@ -44,7 +45,7 @@ function sampleMouth(page: Page, ms: number) {
         let frames = 0;
         const start = performance.now();
         const tick = () => {
-          const v = api.avatar!.getProcedural().mouthOpen;
+          const v = api.avatar!.getProcedural().aa;
           min = Math.min(min, v);
           max = Math.max(max, v);
           frames++;
@@ -66,7 +67,7 @@ async function recordMouth(page: Page) {
     const w = window as unknown as { __mouth: { min: number; max: number; afterMax: number } };
     const rec = (w.__mouth = { min: Infinity, max: -Infinity, afterMax: Infinity });
     const tick = () => {
-      const v = window.__AVATAR_DEBUG__!.avatar!.getProcedural().mouthOpen;
+      const v = window.__AVATAR_DEBUG__!.avatar!.getProcedural().aa;
       rec.min = Math.min(rec.min, v);
       rec.max = Math.max(rec.max, v);
       // Lowest value seen after the mouth has opened: proves it closes again between syllables.
@@ -124,7 +125,7 @@ test('an audio file drives the mouth open and closed, then stops', async ({ page
 
   // Playback end releases the source and the mouth closes.
   await expect.poll(() => page.evaluate(() => window.__AVATAR_DEBUG__!.audio.kind), { timeout: 10_000 }).toBe('none');
-  await expect.poll(() => page.evaluate(() => window.__AVATAR_DEBUG__!.avatar!.getProcedural().mouthOpen)).toBeLessThan(0.01);
+  await expect.poll(() => page.evaluate(() => window.__AVATAR_DEBUG__!.avatar!.getProcedural().aa)).toBeLessThan(0.01);
   expect(errors).toEqual([]);
 });
 
@@ -143,7 +144,7 @@ test('the test signal drives the mouth until stopped', async ({ page }) => {
 
   await panel.getByText('stop', { exact: true }).click();
   await expect.poll(() => page.evaluate(() => window.__AVATAR_DEBUG__!.audio.kind)).toBe('none');
-  await expect.poll(() => page.evaluate(() => window.__AVATAR_DEBUG__!.avatar!.getProcedural().mouthOpen)).toBeLessThan(0.01);
+  await expect.poll(() => page.evaluate(() => window.__AVATAR_DEBUG__!.avatar!.getProcedural().aa)).toBeLessThan(0.01);
   expect(errors).toEqual([]);
 });
 
@@ -154,5 +155,50 @@ test('the microphone drives the mouth (fake capture device)', async ({ page }) =
   // Chromium's fake device emits a short beep once a second: too short to hit reliably at a few FPS, so this
   // checks that the mic reaches the analyser; file and test-signal tests cover analyser → mouth.
   expect((await sampleRms(page, 2500)).max).toBeGreaterThan(0.01);
+  expect(errors).toEqual([]);
+});
+
+for (const analyzer of ['headaudio', 'wlipsync'] as const) {
+  test(`${analyzer} loads and drives visemes from the test signal`, async ({ page }) => {
+    const errors = await loaded(page, `/?analyzer=${analyzer}`);
+    const status = () => page.evaluate(() => window.__AVATAR_DEBUG__!.analyzers.status);
+    expect(await status()).toBe('waits for audio');
+
+    await page.getByTestId('lipsync-panel').getByText('test signal').click();
+    await expect.poll(status).toBe('ready');
+    await expect.poll(() => page.evaluate(() => window.__AVATAR_DEBUG__!.visemes.visemeWeight)).toBeGreaterThan(0.99);
+
+    // Record the largest weight per viseme: the buzz must open the mouth through some viseme.
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const p = window.__AVATAR_DEBUG__!.avatar!.getProcedural();
+          const w = window as unknown as { __open?: number };
+          w.__open = Math.max(w.__open ?? 0, p.aa, p.ih, p.ou, p.ee, p.oh);
+          return w.__open;
+        }),
+      )
+      .toBeGreaterThan(0.1);
+
+    await page.getByTestId('lipsync-panel').getByText('stop', { exact: true }).click();
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const p = window.__AVATAR_DEBUG__!.avatar!.getProcedural();
+          return Math.max(p.aa, p.ih, p.ou, p.ee, p.oh);
+        }),
+      )
+      .toBeLessThan(0.01);
+    expect(errors).toEqual([]);
+  });
+}
+
+test('an unavailable analyser falls back to amplitude', async ({ page }) => {
+  const errors = await loaded(page, '/?analyzer=wlipsync');
+  await page.route('**/lipsync/wlipsync/profile.bin', (route) => route.fulfill({ status: 404 }));
+  await page.getByTestId('lipsync-panel').getByText('test signal').click();
+  await expect.poll(() => page.evaluate(() => window.__AVATAR_DEBUG__!.analyzers.status)).toBe('error: wLipSync profile: HTTP 404');
+  expect(await page.evaluate(() => window.__AVATAR_DEBUG__!.visemes.mode)).toBe('amplitude');
+  await expect.poll(() => page.evaluate(() => window.__AVATAR_DEBUG__!.avatar!.getProcedural().aa)).toBeGreaterThan(0.3);
   expect(errors).toEqual([]);
 });

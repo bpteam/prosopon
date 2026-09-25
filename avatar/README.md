@@ -35,7 +35,13 @@ src/
 ├── audio/
 │   ├── AudioInput.ts           file / mic / test signal / external node → AnalyserNode, readRms()
 │   ├── AmplitudeLipSync.ts     RMS → dB → mouth openness, attack/release follower (a MouthSource)
-│   └── LipSyncDebugPanel.ts    "Lip Sync" GUI folder: sources, mapping, live level
+│   ├── VisemeLipSync.ts        analyser shape × loudness → aa/ih/ou/ee/oh, amplitude fallback (the MouthSource used)
+│   ├── VisemeAnalyzer.ts       analyser contract: an input node + read() of the current mouth shape
+│   ├── VisemeAnalyzerHost.ts   lazy creation, tap into AudioInput, failure → amplitude
+│   ├── analyzers/              HeadAudio and wLipSync adapters + their phoneme → VRM tables
+│   ├── LipSyncDebugPanel.ts    "Lip Sync" GUI folder: sources, mapping, live level
+│   └── VisemeDebugPanel.ts     "Visemes" subfolder: analyser choice/status, blending, live weights
+├── vendor/headaudio/           HeadAudio main-thread module (not on npm; see its README)
 └── debug/
     ├── DebugOverlay.ts         FPS, frame time, VRM state, WebGL version, triangles, draw calls
     └── FpsMeter.ts
@@ -80,11 +86,40 @@ await audio.playFile(file);                 // or startMic(), startTestSignal(),
 - Level is mapped linearly in dBFS between `noiseFloorDb` (closed, doubles as a noise gate) and `fullOpenDb`, times
   `maxOpen`, then smoothed by a one-pole follower with `attack`/`release` time constants. The step is
   `target + (v − target)·e^(−Δt/τ)`, exact for piecewise-constant input, so it is frame-rate independent.
-- The result goes into `ProceduralPose.mouthOpen` and drives the `aa` preset as `max(manual, procedural)`; other
-  visemes stay manual. Viseme analysis (US-003 step 2) replaces the source, not the plumbing.
+- A scalar source drives the `aa` preset through `ProceduralPose.aa` as `max(manual, procedural)`.
 - Routing: file/test signal are audible, mic and external nodes are only analysed (no feedback). The mic is opened
   with `autoGainControl: false`, because AGC flattens the dynamics amplitude lip sync relies on.
 - The AudioContext is created on the first start call, so start sources from a user gesture (autoplay policy).
+
+### Lip sync (visemes)
+
+```ts
+const visemes = new VisemeLipSync(lipSync);  // wraps the amplitude path
+const analyzers = new VisemeAnalyzerHost(audio, visemes, { headaudio: headAudioFactory(), wlipsync: wLipSyncFactory() }, 'headaudio');
+controller.setMouthSource(visemes);
+```
+
+- A `MouthSource` may return a `MouthShape` (`aa/ih/ou/ee/oh`) instead of a number; each viseme preset is combined
+  with its manual value via `max()`.
+- An analyser only reports the *shape* (weights summing to ≤ 1, all zero = closed). Opening is
+  `shape × ((1 − levelInfluence)·maxOpen + levelInfluence·amplitudeTarget)`, forced to 0 when the amplitude path is
+  below its noise floor, so a stale analyser can't hold the mouth open in silence. Each viseme is then smoothed
+  with the same exact attack/release follower as amplitude.
+- Mode switching crossfades over `modeBlend` between amplitude `aa` and the viseme shape. The host falls back to
+  amplitude when the analyser can't be created (no AudioWorklet outside https/localhost, asset 404) or its worklet
+  throws (`processorerror`); `status` says why.
+- Analysers are created on the first audio source (the AudioContext needs a user gesture) and tapped from the
+  `AnalyserNode` via `AudioInput.addTap()`, so they follow source changes.
+- `?analyzer=none|headaudio|wlipsync` picks the analyser at load; default `headaudio`.
+
+| analyser | how | output | assets |
+|---|---|---|---|
+| HeadAudio ([met4citizen/HeadAudio](https://github.com/met4citizen/HeadAudio), MIT) | MFCC + Gaussian prototypes, AudioWorklet, ~50 ms | one of 15 Oculus visemes, mapped in `OCULUS_TO_VRM` (PP/sil close the mouth) | `public/lipsync/headaudio/` (worklet + 14 kB English model) |
+| wLipSync ([mrxz/wLipSync](https://github.com/mrxz/wLipSync), MIT, npm) | uLipSync MFCC matching, WASM worklet, 1024-sample window at 16 kHz | A/I/U/E/O/S weights, mapped in `ULIPSYNC_TO_VRM` | `public/lipsync/wlipsync/profile.bin`: wLipSync's example profile, calibrated for one voice; other voices need uLipSync calibration in Unity |
+
+Known limits: HeadAudio's model is English-only, the example wLipSync profile is one speaker, and neither has
+been validated on real Russian or ChatGPT voice output yet. Both analysers lag the amplitude path by roughly their
+window (~50–70 ms); opening timing follows amplitude, only the shape arrives late.
 
 ### Pose layering
 
@@ -93,7 +128,7 @@ await audio.playFile(file);                 // or startMic(), startTestSignal(),
 | layer      | written by                                           | composition                              |
 |------------|------------------------------------------------------|------------------------------------------|
 | manual     | `setExpression`, `setBoneRotation`, `setHeadRotation`| base value                               |
-| procedural | `setProcedural` (AvatarController: idle × state + mouth) | added to bones; `blink`/`aa` = `max(manual, procedural)` |
+| procedural | `setProcedural` (AvatarController: idle × state + mouth) | added to bones; `blink`, `aa/ih/ou/ee/oh` = `max(manual, procedural)` |
 
 Because of the layering, debug sliders and idle motion don't overwrite each other. Rotations of bones that `Avatar` drives
 (head, neck, chest, spine, shoulders, and anything set via `setBoneRotation`) are rewritten every frame, so write
@@ -126,7 +161,7 @@ Exception: a change to `AvatarLoader.ts` only affects the next full reload, beca
 
 ## Dev API
 
-In dev mode, `window.__AVATAR_DEBUG__ = { loaded, error, fps, avatar, idle, stage, controller, audio, lipSync, state }`
+In dev mode, `window.__AVATAR_DEBUG__ = { loaded, error, fps, avatar, idle, stage, controller, audio, lipSync, visemes, analyzers, state }`
 (`state` is a live getter; `controller`/`state` are `null` until the model is loaded). `<body data-avatar-loaded>`
 is `false` → `true`, or `error` (with `data-avatar-error`) if loading fails. `<body data-avatar-state>` mirrors
 the conversation state once the avatar is loaded. Load errors also go to

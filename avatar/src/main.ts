@@ -9,6 +9,11 @@ import type { AvatarState } from './avatar/AvatarStateProfiles';
 import { AmplitudeLipSync } from './audio/AmplitudeLipSync';
 import { AudioInput } from './audio/AudioInput';
 import { LipSyncDebugPanel } from './audio/LipSyncDebugPanel';
+import { headAudioFactory } from './audio/analyzers/HeadAudioAnalyzer';
+import { wLipSyncFactory } from './audio/analyzers/WLipSyncAnalyzer';
+import { VisemeAnalyzerHost, type AnalyzerChoice } from './audio/VisemeAnalyzerHost';
+import { VisemeDebugPanel } from './audio/VisemeDebugPanel';
+import { VisemeLipSync } from './audio/VisemeLipSync';
 import { MAX_FRAME_DELTA, MODEL_URL, REST_POSE } from './config';
 import { DebugOverlay } from './debug/DebugOverlay';
 import { AvatarStage } from './renderer/AvatarStage';
@@ -24,6 +29,8 @@ export interface AvatarDebugApi {
   controller: AvatarController | null;
   audio: AudioInput;
   lipSync: AmplitudeLipSync;
+  visemes: VisemeLipSync;
+  analyzers: VisemeAnalyzerHost;
   /** Live getter: current conversation state, or null before the avatar is loaded. */
   readonly state: AvatarState | null;
 }
@@ -45,12 +52,20 @@ const stage = new AvatarStage(container);
 const idle = new AvatarIdleController();
 const audio = new AudioInput();
 const lipSync = new AmplitudeLipSync(() => audio.readRms());
+const visemes = new VisemeLipSync(lipSync);
+const analyzers = new VisemeAnalyzerHost(
+  audio,
+  visemes,
+  { headaudio: headAudioFactory(), wlipsync: wLipSyncFactory() },
+  analyzerFromUrl() ?? 'headaudio',
+);
 const overlay = new DebugOverlay(document.body, stage.renderer, { loaded: false, vrmVersion: null, webgl2: stage.isWebGL2 });
 overlay.visible = import.meta.env.DEV;
 
 let controller: AvatarController | null = null;
 let panel: AvatarDebugPanel | null = null;
 let lipSyncPanel: LipSyncDebugPanel | null = null;
+let visemePanel: VisemeDebugPanel | null = null;
 let errorBanner: HTMLElement | null = null;
 
 const debugApi: AvatarDebugApi = {
@@ -63,6 +78,8 @@ const debugApi: AvatarDebugApi = {
   controller: null,
   audio,
   lipSync,
+  visemes,
+  analyzers,
   get state() {
     return controller?.getState() ?? null;
   },
@@ -89,7 +106,7 @@ async function boot(): Promise<void> {
     if (hot) hot.vrm = vrm;
 
     const ctrl = new AvatarController({ avatar: new Avatar(vrm, { restPose: REST_POSE }), idle });
-    ctrl.setMouthSource(lipSync);
+    ctrl.setMouthSource(visemes);
     ctrl.update(0);
     stage.setAvatar(ctrl.avatar);
 
@@ -102,6 +119,7 @@ async function boot(): Promise<void> {
       setOverlayVisible: (v) => (overlay.visible = v),
     });
     lipSyncPanel = new LipSyncDebugPanel(panel.gui, audio, lipSync);
+    visemePanel = new VisemeDebugPanel(lipSyncPanel.folder, analyzers, visemes);
 
     overlay.setInfo({ loaded: true, vrmVersion: formatVrmVersion(ctrl.avatar.vrmVersion) });
     debugApi.loaded = true;
@@ -137,7 +155,9 @@ if (import.meta.hot) {
   import.meta.hot.dispose(() => {
     loop.stop();
     controller?.dispose();
+    visemePanel?.dispose();
     lipSyncPanel?.dispose();
+    analyzers.dispose();
     panel?.dispose();
     void audio.dispose();
     overlay.dispose();
@@ -145,4 +165,10 @@ if (import.meta.hot) {
     stage.dispose();
     delete window.__AVATAR_DEBUG__;
   });
+}
+
+/** `?analyzer=none|headaudio|wlipsync` overrides the default viseme analyser. */
+function analyzerFromUrl(): AnalyzerChoice | null {
+  const v = new URLSearchParams(location.search).get('analyzer');
+  return v === 'none' || v === 'headaudio' || v === 'wlipsync' ? v : null;
 }

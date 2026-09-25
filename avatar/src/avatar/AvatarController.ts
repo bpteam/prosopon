@@ -1,17 +1,17 @@
 import type * as THREE from 'three';
-import type { Avatar, BoneRotation, HumanBoneName } from './Avatar';
+import { CLOSED_MOUTH, type Avatar, type BoneRotation, type HumanBoneName, type MouthShape } from './Avatar';
 import { AvatarIdleController } from './AvatarIdleController';
 import type { AvatarState, AvatarStateProfile } from './AvatarStateProfiles';
 import { BehaviorMixer } from './BehaviorMixer';
 import { ConversationStateMachine, type ConversationStateMachineOptions } from './ConversationStateMachine';
 
 /**
- * Anything that produces mouth openness once per frame (amplitude lip sync, later viseme analysers).
+ * Anything that drives the mouth once per frame (amplitude lip sync, viseme analysers).
  * Pulled by AvatarController.update(), so it runs on the render loop's delta.
  */
 export interface MouthSource {
-  /** @returns mouth openness, [0, 1] */
-  update(deltaTime: number): number;
+  /** @returns mouth openness on "aa", [0, 1], or a weight per viseme preset */
+  update(deltaTime: number): number | Readonly<MouthShape>;
 }
 
 export type StateChangeListener = (state: AvatarState, previous: AvatarState) => void;
@@ -146,7 +146,7 @@ export class AvatarController implements AvatarControllerApi {
 
   // --- Lip sync --------------------------------------------------------------
 
-  /** Source of procedural mouth openness; null closes the procedural mouth (manual "aa" still applies). */
+  /** Source of procedural mouth motion; null closes the procedural mouth (manual visemes still apply). */
   setMouthSource(source: MouthSource | null): void {
     this.mouthSource = source;
   }
@@ -156,7 +156,7 @@ export class AvatarController implements AvatarControllerApi {
   update(deltaTime: number): void {
     const profile = this.machine.update(deltaTime);
     const idlePose = this.idle.update(deltaTime);
-    const mouth = this.mouthSource?.update(deltaTime) ?? 0;
+    const mouth = this.mouthSource?.update(deltaTime) ?? CLOSED_MOUTH;
     this.avatar.setProcedural(this.mixer.compose(idlePose, profile, mouth));
     this.avatar.update(deltaTime);
   }
