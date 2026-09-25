@@ -1,0 +1,50 @@
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* The canvas is transparent; this background proves alpha works. */
+  background: radial-gradient(circle at 50% 35%, #3a4660 0%, #1a1f2b 70%);
+  color: #e6e6e6;
+}
+
+#stage {
+  position: fixed;
+  inset: 0;
+}
+
+#stage canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.debug-overlay {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  margin: 0;
+  padding: 6px 8px;
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: pre;
+  background: rgba(0, 0, 0, 0.55);
+  border-radius: 4px;
+  pointer-events: none;
+  z-index: 10;
+}
+
+.error-banner {
+  position: fixed;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  max-width: min(90vw, 720px);
+  padding: 10px 14px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  background: rgba(160, 20, 30, 0.9);
+  border-radius: 4px;
+  z-index: 20;
+}
