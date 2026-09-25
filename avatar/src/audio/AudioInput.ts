@@ -28,6 +28,8 @@ export class AudioInput {
   /** Bumped by every start*() and stop(), so a start that resolves after a newer one gives up. */
   private generation = 0;
   private readonly listeners = new Set<(kind: AudioInputKind) => void>();
+  /** Extra consumers of the analysed signal (viseme analysers). Survive source changes. */
+  private readonly taps = new Set<AudioNode>();
 
   constructor(options: AudioInputOptions = {}) {
     this.fftSize = options.fftSize ?? 1024;
@@ -164,6 +166,23 @@ export class AudioInput {
     this.activate('node', () => node.disconnect(this.analyser!));
   }
 
+  /**
+   * Feed the analysed signal (whatever source is active) into `node` as well, e.g. a viseme analyser.
+   * The node must belong to `context`. @returns remove
+   */
+  addTap(node: AudioNode): () => void {
+    this.taps.add(node);
+    this.analyser?.connect(node);
+    return () => {
+      if (!this.taps.delete(node)) return;
+      try {
+        this.analyser?.disconnect(node);
+      } catch {
+        // Already disconnected by a source teardown.
+      }
+    };
+  }
+
   stop(): void {
     this.generation++;
     const teardown = this.teardown;
@@ -189,6 +208,7 @@ export class AudioInput {
   async dispose(): Promise<void> {
     this.stop();
     this.listeners.clear();
+    this.taps.clear();
     const ctx = this.ctx;
     this.ctx = null;
     this.analyser = null;
@@ -215,6 +235,8 @@ export class AudioInput {
   private activate(kind: AudioInputKind, teardown: () => void): void {
     this.teardown?.();
     this.teardown = teardown;
+    // File/test teardowns disconnect all analyser outputs; re-attach taps (duplicate connections are no-ops).
+    for (const tap of this.taps) this.analyser?.connect(tap);
     this.setKind(kind);
   }
 

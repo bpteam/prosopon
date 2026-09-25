@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Avatar } from '../../src/avatar/Avatar';
-import { AvatarController, type MouthSource } from '../../src/avatar/AvatarController';
+import { AvatarController } from '../../src/avatar/AvatarController';
 import { AvatarIdleController } from '../../src/avatar/AvatarIdleController';
 import { AmplitudeLipSync, follow, mapLevel, MIN_DB, toDb } from '../../src/audio/AmplitudeLipSync';
 import { createFakeVrm, silentLogger } from './fakeVrm';
@@ -11,7 +11,7 @@ function signal(initial = 0) {
   return s;
 }
 
-function run(source: MouthSource, seconds: number, dt: number): number {
+function run(source: { update(dt: number): number }, seconds: number, dt: number): number {
   let v = 0;
   const frames = Math.round(seconds / dt);
   for (let i = 0; i < frames; i++) v = source.update(dt);

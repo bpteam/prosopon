@@ -31,8 +31,23 @@ export interface AvatarRuntime {
   update(delta: number): void;
 }
 
+/** VRM 1.0 mouth presets driven by lip sync. */
+export const VISEMES = ['aa', 'ih', 'ou', 'ee', 'oh'] as const;
+export type Viseme = (typeof VISEMES)[number];
+
+/** Weight per viseme preset, [0, 1] each. */
+export type MouthShape = Record<Viseme, number>;
+
+export const CLOSED_MOUTH: Readonly<MouthShape> = Object.freeze({ aa: 0, ih: 0, ou: 0, ee: 0, oh: 0 });
+
+const VISEME_SET: ReadonlySet<string> = new Set(VISEMES);
+
+export function isViseme(name: string): name is Viseme {
+  return VISEME_SET.has(name);
+}
+
 /** Output of procedural animation (idle, later lip-sync etc.). Additive on top of the manual layer. */
-export interface ProceduralPose {
+export interface ProceduralPose extends MouthShape {
   /** Head offsets, radians. */
   headYaw: number;
   headPitch: number;
@@ -46,8 +61,7 @@ export interface ProceduralPose {
   /** Gaze offset from the look target, degrees. */
   gazeYaw: number;
   gazePitch: number;
-  /** Procedural mouth openness (lip sync), [0, 1]. Drives MOUTH_OPEN_EXPRESSION via max() with the manual value. */
-  mouthOpen: number;
+  // aa/ih/ou/ee/oh (MouthShape): procedural viseme weights from lip sync, combined with manual values via max().
 }
 
 export const EMPTY_PROCEDURAL_POSE: Readonly<ProceduralPose> = Object.freeze({
@@ -59,7 +73,7 @@ export const EMPTY_PROCEDURAL_POSE: Readonly<ProceduralPose> = Object.freeze({
   blink: 0,
   gazeYaw: 0,
   gazePitch: 0,
-  mouthOpen: 0,
+  ...CLOSED_MOUTH,
 });
 
 export interface AvatarLogger {
@@ -90,8 +104,6 @@ const LEAN = {
 } as const;
 
 const BLINK_EXPRESSION = 'blink';
-/** VRM preset driven by amplitude lip sync. */
-export const MOUTH_OPEN_EXPRESSION = 'aa';
 
 interface DrivenBone {
   readonly name: HumanBoneName;
@@ -267,7 +279,7 @@ export class Avatar {
     p.blink = clamp01(pose.blink);
     p.gazeYaw = pose.gazeYaw;
     p.gazePitch = pose.gazePitch;
-    p.mouthOpen = clamp01(pose.mouthOpen);
+    for (const v of VISEMES) p[v] = clamp01(pose[v]);
   }
 
   getProcedural(): Readonly<ProceduralPose> {
@@ -350,7 +362,7 @@ export class Avatar {
       const name = names[i]!;
       let value = this.manualExpressions.get(name) ?? 0;
       if (name === BLINK_EXPRESSION) value = Math.max(value, this.procedural.blink);
-      else if (name === MOUTH_OPEN_EXPRESSION) value = Math.max(value, this.procedural.mouthOpen);
+      else if (isViseme(name)) value = Math.max(value, this.procedural[name]);
       manager.setValue(name, value);
     }
   }
