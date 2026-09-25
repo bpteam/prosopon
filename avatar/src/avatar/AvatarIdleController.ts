@@ -127,6 +127,7 @@ export class AvatarIdleController {
       blinkPhase: 'open',
       gazeYaw: 0,
       gazePitch: 0,
+      mouthOpen: 0,
       gazePhase: 'center',
     };
   }

@@ -46,6 +46,8 @@ export interface ProceduralPose {
   /** Gaze offset from the look target, degrees. */
   gazeYaw: number;
   gazePitch: number;
+  /** Procedural mouth openness (lip sync), [0, 1]. Drives MOUTH_OPEN_EXPRESSION via max() with the manual value. */
+  mouthOpen: number;
 }
 
 export const EMPTY_PROCEDURAL_POSE: Readonly<ProceduralPose> = Object.freeze({
@@ -57,6 +59,7 @@ export const EMPTY_PROCEDURAL_POSE: Readonly<ProceduralPose> = Object.freeze({
   blink: 0,
   gazeYaw: 0,
   gazePitch: 0,
+  mouthOpen: 0,
 });
 
 export interface AvatarLogger {
@@ -87,6 +90,8 @@ const LEAN = {
 } as const;
 
 const BLINK_EXPRESSION = 'blink';
+/** VRM preset driven by amplitude lip sync. */
+export const MOUTH_OPEN_EXPRESSION = 'aa';
 
 interface DrivenBone {
   readonly name: HumanBoneName;
@@ -262,6 +267,7 @@ export class Avatar {
     p.blink = clamp01(pose.blink);
     p.gazeYaw = pose.gazeYaw;
     p.gazePitch = pose.gazePitch;
+    p.mouthOpen = clamp01(pose.mouthOpen);
   }
 
   getProcedural(): Readonly<ProceduralPose> {
@@ -344,6 +350,7 @@ export class Avatar {
       const name = names[i]!;
       let value = this.manualExpressions.get(name) ?? 0;
       if (name === BLINK_EXPRESSION) value = Math.max(value, this.procedural.blink);
+      else if (name === MOUTH_OPEN_EXPRESSION) value = Math.max(value, this.procedural.mouthOpen);
       manager.setValue(name, value);
     }
   }

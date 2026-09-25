@@ -239,7 +239,7 @@ describe('composition', () => {
 
   it('scales idle motion and adds gaze offsets per profile', () => {
     const mixer = new BehaviorMixer();
-    const idlePose = { headYaw: 0.02, headPitch: 0.01, headRoll: -0.01, breath: 0.5, lean: 0, blink: 0.4, gazeYaw: 4, gazePitch: 2 };
+    const idlePose = { headYaw: 0.02, headPitch: 0.01, headRoll: -0.01, breath: 0.5, lean: 0, blink: 0.4, gazeYaw: 4, gazePitch: 2, mouthOpen: 0 };
     const p = STATE_PROFILES.thinking;
     const out = mixer.compose(idlePose, p);
     expect(out.headYaw).toBeCloseTo(0.02 * p.headMotionMultiplier + p.headYawOffset);
