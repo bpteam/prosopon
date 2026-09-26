@@ -1,34 +1,40 @@
-# Prosopon Chrome extension (US-004, US-005, US-006)
+# Prosopon Chrome extension
 
-Replaces the ChatGPT voice orb with the VRM avatar and drives its mouth from the audio the ChatGPT tab plays.
-Optionally (US-005) it also listens to the user's microphone to tell when they speak and how their voice sounds,
-so the avatar switches listening / thinking / speaking and reacts a little. Manifest V3, Chrome 116+. Everything
-stays local: neither the captured tab audio nor the microphone leaves the browser, and neither is recorded.
+Replaces the ChatGPT voice orb on `chatgpt.com` with the VRM avatar, drives its mouth from the audio the tab plays,
+optionally listens to the user's microphone for conversation state and reactions, and optionally refines emotion with
+a local ONNX model. Manifest V3, Chrome 116+. All audio analysis and inference stay in the browser; nothing is
+recorded.
 
-## Use
+Product context and invariants: [../PRODUCT.md](../PRODUCT.md). Rules for changes (including which docs to update):
+[../AGENTS.md](../AGENTS.md). The avatar/audio/behaviour core it imports: [../avatar/README.md](../avatar/README.md).
+
+## Build
 
 ```bash
-cd avatar && npm ci      # Avatar Core and its dependencies (three, three-vrm, wlipsync) live here
+cd avatar && npm ci      # Avatar Core and its dependencies (three, three-vrm, wlipsync, onnxruntime-web) live here
 cd ../extension && npm ci
-npm run build            # → extension/dist
+npm run build            # typecheck + production build → extension/dist
 ```
 
-`chrome://extensions` → Developer mode → Load unpacked → `extension/dist`. On chatgpt.com, start voice mode and
-click the Prosopon toolbar button. Click again to disable. The badge shows `ON`, `…` (starting) or `!` (error, the
-tooltip says why; click to retry).
+| Script | What it does |
+|---|---|
+| `npm run build` (= `build:extension`) | typecheck, production build into `dist/` |
+| `npm run build:extension:embedded` | same, with the emotion model packaged inside (see [Embedded build](#embedded-build)) |
+| `npm run build:dev` | development build: diagnostics overlay, debug events, service-worker E2E hook |
+| `npm run dev` | development build, rebuilt on change |
+| `npm run typecheck` | `tsc --noEmit` |
+| `npm test` | Vitest unit + architecture tests |
+| `npm run test:e2e` | development build, then Playwright with the unpacked extension |
 
-**Microphone reactions** are off by default. Right-click the toolbar button → *Microphone reactions*. The first time,
-a Prosopon tab asks Chrome for the microphone (the offscreen document that analyses it can't show a prompt); it
-closes itself once allowed. The choice lasts for the browser session (`chrome.storage.session`), so a restarted
-browser starts with the mic off. The mic is open only while the choice is on **and** a tab is enabled. Without the
-permission, or without a mic, the avatar and lip sync work as before.
+Content scripts have no HMR: after a rebuild, reload the extension in `chrome://extensions` and the ChatGPT tab. The
+old content script notices its dead runtime and removes itself, so overlays don't duplicate.
 
 ### Docker
 
-Without a local Node: `compose.yaml` in the repo root has an `extension` service (profile `extension`) and an
-`extension-e2e` service (profile `test`). Both bind-mount `avatar/` and `extension/`, so `extension/dist` appears
-on the host and is loaded unpacked from there. `node_modules` of both packages live in named volumes and are
-reinstalled by the entrypoint when a `package-lock.json` changes.
+`compose.yaml` in the repo root has an `extension` service (profile `extension`) and an `extension-e2e` service
+(profile `test`). Both bind-mount `avatar/` and `extension/`, so `extension/dist` appears on the host and is loaded
+unpacked from there. `node_modules` of both packages live in named volumes and are reinstalled by the entrypoint when
+a `package-lock.json` changes.
 
 ```bash
 docker compose run --rm extension                      # production build → extension/dist
@@ -40,152 +46,230 @@ docker compose --profile test run --rm extension-e2e   # E2E in mcr.microsoft.co
 
 - Build context is the repo root (the extension compiles `avatar/src`); `extension/Dockerfile.dockerignore` limits
   it to the lockfiles.
-- `extension-e2e` rebuilds `extension/dist` in development mode: run the production build again before loading it
-  in Chrome for real use.
-- Containers run as uid 1000 (like the avatar services); with another host uid, `extension/dist` gets the wrong owner.
+- `extension-e2e` rebuilds `extension/dist` in development mode: run the production build again before real use.
+- Containers run as uid 1000; with another host uid, `extension/dist` gets the wrong owner.
 - The Playwright image tag in `extension/Dockerfile` must match `@playwright/test` in `extension/package-lock.json`.
 
-Development: `npm run dev` rebuilds on change (`--mode development`: diagnostics panel over the avatar, E2E hook in
-the service worker). Content scripts have no HMR: after a rebuild, reload the extension and the ChatGPT tab. The
-old content script notices its dead runtime and removes itself, so no duplicate overlays.
+## Use
+
+`chrome://extensions` → Developer mode → *Load unpacked* → `extension/dist`.
+
+- **Avatar.** On chatgpt.com click the Prosopon toolbar icon: the popup opens. *Enable avatar* / *Disable avatar*
+  switches the current tab. The badge shows `ON`, `…` (starting) or `!` (error; the tooltip says why). Start voice
+  mode as usual; the avatar takes the orb's place. The capture survives page reloads; leaving chatgpt.com, closing
+  the tab or the stream ending disables the tab.
+- **Microphone reactions** (off by default). Right-click the toolbar icon → *Microphone reactions (audio stays
+  local)*. The first time, a Prosopon tab asks Chrome for the microphone (the offscreen document can't show a
+  prompt) and closes itself once allowed. The choice is kept in `chrome.storage.session`, so a restarted browser
+  starts with the mic off. The mic is open only while the choice is on **and** a tab is enabled. Without the
+  permission or a mic, the avatar and lip sync work as before.
+- **Emotion model** (optional). Popup → *Emotion Intelligence* → *Install & Enable emotions*; see
+  [Emotion model](#emotion-model).
+
+These three are independent states.
 
 ## Architecture
 
-```
+```text
 chatgpt.com tab ──audio──► chrome.tabCapture ──stream id──► offscreen document
                                                             assistant: AudioInput.attachMediaStream (monitor → speakers)
                                                               AmplitudeLipSync + VisemeLipSync + HeadAudio/wLipSync
                                                               → LipSyncFrame @ 30 Hz, per tab
+                                                              feature worklet → ProsodyEmotionAnalyzer → EmotionFrame @ 8 Hz
 microphone (opt-in) ──getUserMedia──────────────────────►   user: UserVoicePipeline (own AudioContext)
-                                                              AudioWorklet: UserVoiceAnalyzer (VAD, MPM pitch,
-                                                              baseline), 0 outputs → UserVoiceFrame @ 25 Hz
+                                                              AudioWorklet: UserVoiceAnalyzer (VAD, pitch, baseline),
+                                                              0 outputs → UserVoiceFrame @ 25 Hz → EmotionFrame @ 8 Hz
+                                                            local model (if installed): EmotionModelHost, both channels
 content script ◄──────────── runtime Port (LIPSYNC_PORT) ───┘
   ContentLifecycle → (on enable) import avatar-runtime.js
   AvatarOverlay (shadow root) · ChatGPTAdapter
   ConversationSignalResolver ← voice UI + LipSyncFrame.active + UserVoiceFrame.speaking → AvatarController.setState
-  AvatarController ← FrameMouthSource (assistant only) + UserReactionMapper (ReactionSource) → BehaviorMixer
+  AvatarController ← FrameMouthSource (assistant only) + UserReactionMapper + EmotionChannels + GestureEngine
 ```
 
 | Context | Owns | Never |
 |---|---|---|
-| `background/` service worker | action click, `getMediaStreamId`, offscreen lifecycle, per-tab state (`TabSessions`), routing | DOM, audio, three.js |
-| `offscreen/` | `MediaStream`s (tab + mic), one `AudioContext` per pipeline, analysers, `LipSyncFrame`/`UserVoiceFrame` generation | three.js, VRM, Avatar, ChatGPT DOM; mixing the two signals |
+| `background/` service worker | popup/menu commands, `getMediaStreamId`, offscreen lifecycle, per-tab state (`TabSessions`), mic opt-in, `EmotionModelInstaller`, routing | DOM, audio, three.js |
+| `offscreen/` | `MediaStream`s (tab + mic), one `AudioContext` per pipeline, analysers, `ProsodyChannel`s, emotion model host, frame generation | three.js, VRM, Avatar, ChatGPT DOM; mixing the two signals |
+| `content/` | overlay, renderer, `AvatarController`, `ConversationSignalResolver`, ChatGPT DOM (in `ChatGPTAdapter` only) | audio nodes, PCM, streams |
+| `popup/` | avatar toggle for the active tab, emotion model controls | analysis, rendering |
 | `permission/` | the one-time microphone grant for the extension origin | analysis (the track is stopped at once) |
-| `content/` | overlay, renderer, `AvatarController`, ChatGPT DOM (in `ChatGPTAdapter` only) | audio nodes, PCM, streams |
+| `emotion/` | model manifest, installer, IndexedDB storage, installed-model reader | audio processing, rendering |
 
-Enforced by `tests/unit/architecture.test.ts` on the import graph.
+The service worker, offscreen, content and worklet boundaries are enforced by `tests/unit/architecture.test.ts`
+on the import graph; `popup/` and `emotion/` have no such test.
 
-- **Reuse, not copies.** All avatar/audio code is imported from `avatar/src` (`@avatar/*` alias). New core pieces
-  added for this story live there too: `LipSyncFrame` (the cross-context contract), `FrameMouthSource` (a
-  `MouthSource` fed by frames), `AudioInput.attachMediaStream`, `AvatarController.attachAvatar`, `MouthShape.ts`
-  (three-free mouth contract, so the offscreen bundle has no three.js).
-- **Transport.** The content script connects a Port straight to the offscreen document, so 30 frames/s don't go
-  through the service worker. Frames are ~100 bytes; the content side interpolates them at display rate and closes
-  the mouth if they stop for 250 ms.
+- **Reuse, not copies.** All avatar/audio code is imported from `avatar/src` (`@avatar/*`). Cross-context contracts
+  live in the core too: `LipSyncFrame`, `FrameMouthSource`, `MouthShape`, `UserVoiceFrame`, `EmotionFrame`.
+- **Build.** `scripts/build.mjs` runs three Vite builds: ES (service worker, offscreen, permission page, popup, avatar
+  runtime), IIFE (the content script), and a single-file ES worklet (`worklets/user-voice.js`). It copies
+  `avatar/public/` (VRM, lip-sync assets), the wLipSync worklet/WASM and ONNX Runtime's
+  `ort-wasm-simd-threaded.jsep.wasm` into `dist/`. `import.meta.env.DEV` follows `NODE_ENV`, which the script sets
+  from `--mode`.
+- **Transport.** The content script connects a Port straight to the offscreen document, so frames don't go through
+  the service worker. Frames are ~100 bytes; the content side interpolates them at display rate and closes the mouth
+  if they stop for 250 ms. Messages are a typed union with `PROTOCOL_VERSION` (`shared/messages.ts`); receivers
+  validate with `parseMessage` and ignore anything else.
 - **State.** `TabSessions` is the only writer of `disabled | starting | enabled | error`; enable/disable are
-  idempotent. The SW is killed after ~30 s idle; on restart it rebuilds state from the captures the offscreen
-  document still holds (`capture:list`), so no `storage` permission. The capture survives page reloads; leaving
-  chatgpt.com, closing the tab or the stream ending disables the tab.
-- **Messages** are a typed union with `PROTOCOL_VERSION` (`shared/messages.ts`); receivers validate with
-  `parseMessage` and ignore anything else.
+  idempotent. The service worker is killed after ~30 s idle; on restart it rebuilds tab state from the captures the
+  offscreen document still holds (`capture:list`) and the model state from `chrome.storage.local`.
 - **Early state.** The controller exists before the VRM loads, so resolver states set during loading are kept.
-- **Weight on chatgpt.com.** The manifest content script is ~4 kB and does nothing until enabled; the avatar
-  runtime (~770 kB, three.js) is imported from `web_accessible_resources` on activation only. Side effect: the page
-  can detect the extension through those resources.
-- **Conversation state** is decided in one place, `ConversationSignalResolver` (content): voice UI closed → `idle`;
-  user speaking → `listening` (beats the assistant: interruption); assistant audio → `speaking` (held 450 ms); user
-  just stopped, no reply yet → `thinking` (after a 200 ms grace, back to `listening` after 6 s without a reply);
-  otherwise `listening`. Lip sync and the user analyser only produce signals; neither calls `setState`.
-- **User voice (US-005)** — core in `avatar/src/audio/user/`: `VoiceActivityDetector` (tracked noise floor,
-  activation/deactivation margins 12/6 dB, attack 100 ms, hangover 300 ms), `PitchDetector` (McLeod on a 16 kHz
-  decimation, 60–800 Hz, confidence ≥ 0.8 or `pitchHz = null`), `PitchBaseline` (median of the first 1.5 s of voiced
-  speech, then a 40 s log-domain average: relative pitch in semitones), `UserVoiceAnalyzer` (fixed 10 ms hops, so
-  chunk size doesn't matter). It runs inside an AudioWorklet (`UserVoiceWorklet`, its own single-file build); samples
-  never leave the render thread, only `UserVoiceFrame` numbers do. The worklet node has zero outputs: the mic has no
-  path to the speakers, and every edge of that graph is checked in `UserVoicePipeline.link()`.
-- **Reactions** — `UserReactionMapper` turns frames into a bounded `UserReactionFrame` (engagement, pitch lift, nod)
-  for `BehaviorMixer`, which clamps it to `REACTION_LIMITS` (±12 % head motion, 0.7° lean, 0.7° chin lift, a 3° nod).
-  A nod follows an utterance of ≥ 500 ms, at most every 2 s. Reactions are muted while the assistant speaks (the mic
-  may be hearing it). The mouth never follows the user.
-- **Prosody & emotion (US-006)** — both voice channels go through the same code: the voice-feature worklet (VAD, pitch,
-  spectral centroid/roll-off, ZCR) and one `ProsodyEmotionAnalyzer` instance per channel (`ProsodyChannel` in the
-  offscreen document; the assistant's is tapped off the tab capture, one per tab; the user's off the mic pipeline).
-  Each emits an `EmotionFrame` (valence, arousal, energy, tension, pitch lift/variation, confidence,
-  `valenceConfidence`, `mode`) at 8 Hz over the Port. The content script feeds them into `EmotionChannels` (one
-  follower per channel, stale → neutral) → `BehaviorMixer`, which weights them by conversation state
-  (`assistantEmotionWeight`/`userEmotionWeight` in `AvatarStateProfiles`: speaking 1/0, listening 0.15/1, so an
-  interruption hands priority to the user over the 0.35 s state blend) and by confidence. Emotion writes
-  happy/relaxed/sad/angry/surprised, head/gaze motion and posture, never a viseme. No STT, no text, no backend.
-- **Local model (optional)** — `emotion-model/model.json` + the `.onnx` next to it in the extension package
-  (`avatar/public/emotion-model/`, git-ignored). None ships: the candidates known to fit (wav2vec2/wav2small A/D/V
-  regressors) are non-commercial-licensed and English-trained. Without it the mode is `heuristic`; with it
-  `ml-webgpu` or `ml-wasm` (ONNX Runtime Web; WebGPU when an adapter exists, else single-threaded WASM); a model
-  that doesn't load, times out (30 s) or fails 3 inferences in a row turns every channel to `fallback` (prosody
-  rules). The worklet posts 16 kHz PCM chunks to the offscreen document only while a model is configured; they
-  never leave it. The manifest allows `'wasm-unsafe-eval'` on extension pages for this (without it: "Refused to
-  compile or instantiate WebAssembly module"). ONNX Runtime's binary adds 28 MB to the package.
+- **Weight on chatgpt.com.** The manifest content script is ~4 kB and inert until enabled; the avatar runtime
+  (three.js) is imported from `web_accessible_resources` on activation only. Side effect: the page can detect the
+  extension through those resources.
+- **Recovery after install/update.** The service worker re-injects `content.js` into open chatgpt.com tabs
+  (`scripting`), so they work without a reload.
+- **Conversation state** is decided in one place, `ConversationSignalResolver`: voice UI closed → `idle`; user
+  speaking → `listening` (beats the assistant only after 300 ms, `interruptionMinDuration`); assistant audio →
+  `speaking` (held 450 ms); user just stopped, no reply yet → `thinking` (after 200 ms, back to `listening` after
+  6 s); otherwise `listening`. Lip sync and the user analyser only produce signals.
+- **User voice.** The worklet runs the core `UserVoiceAnalyzer` (see
+  [../avatar/README.md](../avatar/README.md#user-voice-contracts)); samples never leave the render thread, only
+  frames do. The worklet node has zero outputs: every edge of the mic graph is checked in `UserVoicePipeline.link()`.
+  Reactions are muted while the assistant speaks (the mic may be hearing it). The mouth never follows the user.
+- **Prosody & emotion.** Both channels use one `ProsodyEmotionAnalyzer` each (`ProsodyChannel`: the assistant's is
+  tapped off the tab capture, one per tab; the user's off the mic pipeline). The content script feeds the frames
+  into `EmotionChannels` → `BehaviorMixer`, weighted by conversation state (speaking 1/0, listening 0.15/1, so an
+  interruption hands priority to the user over the 0.35 s state blend) and by confidence.
 
-  ```json
-  { "file": "model.onnx", "sampleRate": 16000, "windowSeconds": 2, "arousalIndex": 0, "valenceIndex": 2,
-    "outputRange": [0, 1], "trust": 0.6, "inferInterval": 0.5 }
-  ```
-  Indices and range depend on the model: check its card. `trust` is how much the model overrides the rules.
+## Emotion model
+
+Optional. Without it every channel runs in `heuristic` mode (prosody rules). The model and its pin are defined in
+**[`src/emotion/EmotionModelManifest.ts`](src/emotion/EmotionModelManifest.ts)**, the technical source of truth; the
+values below are for reference only.
+
+| | |
+|---|---|
+| model | [`omote-ai/distilhubert-ser`](https://huggingface.co/omote-ai/distilhubert-ser) |
+| artifact | `distilhubert_ser_int8.onnx` |
+| revision | `6c4a6846578f718581e01883d01af7d174839123` (immutable commit, never `resolve/main`) |
+| size | 50,630,102 bytes |
+| sha256 | `b3bd62c1d1e74983ce712458e25368dfe32d37b7fc20618f109fd0bfa49cfa97` |
+| input | mono 16 kHz Float32 (`audio`), 2 s window, inference every 0.25 s |
+
+Changing the model means changing the manifest (and this table). An installation whose metadata no longer matches
+the manifest is treated as not installed.
+
+**Install (remote pinned download, default build).** Popup → *Install & Enable emotions* → confirmation →
+`EmotionModelInstaller` in the service worker:
+
+1. downloads the pinned URL over HTTPS, streaming progress to the popup (*Cancel* aborts);
+2. checks the exact byte size, then the SHA-256; on any mismatch or error the partial data and metadata are deleted
+   and the state is `error`;
+3. stores the bytes as a Blob in IndexedDB (database `prosopon-emotion-models`, store `models`, key
+   `<id>@<revision>`); metadata (`modelId`, `revision`, `sha256`, `installedAt`, `enabled`) goes to
+   `chrome.storage.local` (`emotionModelMetadata`). Model bytes never go into `chrome.storage`;
+4. asks the offscreen document to load the model and run a self-test; success → `ready`, failure → `error` with the
+   verified bytes kept, so *Retry installation* recovers without another download.
+
+The offscreen document reads the bytes from IndexedDB only after the service worker confirms the model is installed
+and enabled (`InstalledModel.ts`). Once installed, inference is local and works offline.
+
+**Disable vs Remove.** *Disable emotions* unloads the model and keeps the verified bytes (*Enable emotions* brings it
+back without a download). *Remove emotion model* unloads it and deletes bytes and metadata.
+
+**Runtime fallback.** `OnnxEmotionModel` tries WebGPU (when `navigator.gpu` yields an adapter), then WASM
+(single-threaded: extension pages are not cross-origin isolated). A load that fails or exceeds 30 s, or 3 failed
+inferences in a row, switch every channel to `fallback` (prosody rules); the avatar keeps working. Frame `mode`:
+`heuristic`, `ml-webgpu`, `ml-wasm` or `fallback`. The CSP allows `'wasm-unsafe-eval'` on extension pages for this
+(without it: "Refused to compile or instantiate WebAssembly module"). PCM chunks at 16 kHz are posted from the
+worklets to the offscreen document only while a model is loaded; they never leave it.
+
+### Embedded build
+
+For distribution where a remote model download is undesirable (e.g. Chrome Web Store review):
+
+```bash
+# place the verified artifact (same size and SHA-256 as the manifest) first:
+#   extension/model-assets/distilhubert_ser_int8.onnx      (git-ignored)
+npm run build:extension:embedded                           # PROSOPON_EMBED_MODEL=1 npm run build
+```
+
+The build copies it to `dist/emotion-model/` and fails if the file is missing. The popup flow is the same, but the
+installer reads the packaged file instead of Hugging Face and still verifies size and SHA-256 before copying it into
+IndexedDB. The `PROSOPON_EMBED_MODEL=1 …` script syntax needs a POSIX shell (use Docker or WSL on Windows).
+
+## Permissions
+
+| Permission | Used for |
+|---|---|
+| `tabCapture` | stream id of the ChatGPT tab's audio |
+| `offscreen` | the audio document (`USER_MEDIA` reason: covers tab and mic) |
+| `scripting` | re-injecting `content.js` into open chatgpt.com tabs after install/update |
+| `contextMenus` | the *Microphone reactions* checkbox on the toolbar icon |
+| `storage` | mic opt-in (`storage.session`), emotion model metadata (`storage.local`) |
+| host `https://chatgpt.com/*` | content script, tab URLs, web-accessible avatar runtime |
+| host `https://huggingface.co/*` | the pinned model download |
+
+`tests/unit/manifest.test.ts` pins this list; don't add to it without a concrete use.
+
+## Debugging (development builds)
+
+- The diagnostics overlay over the avatar shows state, lip sync, user voice, conversation signals, emotion and
+  gestures.
+- `window.__PROSOPON_DEBUG__` lives in the content script's isolated world: pick the Prosopon context in the
+  DevTools console's context selector.
+- Page-console events: `prosopon:debug` (e.g. `{ emotionConfig: { baselineWeight: 0.3 } }`) and `prosopon:gesture`
+  (`trigger`, `cancel`, `auto`, `seed`, `config`); the overlay host exposes `data-*` attributes used by E2E.
+- Calibration procedures: [../docs/emotion-calibration.md](../docs/emotion-calibration.md) (prosody/emotion),
+  [../docs/gesture-calibration.md](../docs/gesture-calibration.md) (gestures).
 
 ## Known limitations
 
-- **ChatGPT selectors** in `CHATGPT_SELECTORS` (`ChatGPTAdapter.ts`) were checked against production chatgpt.com on
-  2026-09-26 and will drift. If nothing matches, the avatar sits bottom-right and the orb stays visible. Update them
-  from DevTools; the E2E fixture (`tests/e2e/fixtures/chatgpt.html`) mirrors them.
-- **Echo cancellation.** While captured, the tab's audio is played by the offscreen document. Whether ChatGPT's
-  microphone echo cancellation still gets its reference signal is untested: on speakers (not headphones), check
-  that ChatGPT doesn't hear and interrupt itself.
-- **Crosstalk (US-005).** The same applies to Prosopon's own mic: `echoCancellation: true` is requested, but on
-  speakers the assistant may still reach the mic. There is no custom AEC by design. Mitigation: a user segment only
-  counts as an interruption after 300 ms (`interruptionMinDuration`), and reactions are muted while the assistant
-  speaks. The debug panel counts crosstalk (`user` and `assistant` both active) and ignored short interruptions; if
-  they climb on speakers, use headphones. `autoGainControl: false` is a preference Chrome/devices may ignore.
-- **Device changes.** A mic that disappears ends the pipeline (`unavailable`); it doesn't reopen on its own when a
-  device comes back: toggle *Microphone reactions* off and on.
-- **Debug API.** `window.__PROSOPON_DEBUG__` (development builds) lives in the content script's isolated world:
-  pick the Prosopon context in the DevTools console's context selector to read it.
+- **ChatGPT selectors** in `CHATGPT_SELECTORS` (`ChatGPTAdapter.ts`) were checked against production on 2026-09-26
+  and will drift. If nothing matches, the avatar sits bottom-right and the orb stays visible. Update them from
+  DevTools; the E2E fixture (`tests/e2e/fixtures/chatgpt.html`) mirrors them.
+- **Echo cancellation.** While captured, the tab's audio is played by the offscreen document. Whether ChatGPT's own
+  echo cancellation still gets its reference signal is untested: on speakers, check that ChatGPT doesn't hear and
+  interrupt itself.
+- **Crosstalk.** Prosopon's mic requests `echoCancellation: true`, but on speakers the assistant may still reach it.
+  No custom AEC by design; mitigations are the 300 ms interruption minimum and muted reactions while the assistant
+  speaks. The overlay counts crosstalk and ignored short interruptions; if they climb, use headphones.
+  `autoGainControl: false` is a preference Chrome/devices may ignore.
+- **Device changes.** A mic that disappears ends the pipeline (`unavailable`); toggle *Microphone reactions* off and
+  on after reconnecting.
 - **Latency.** Mouth lags audio by roughly analysis window + HeadAudio (~50 ms) + frame interval.
-  `AUDIO_RUNTIME_CONFIG.monitorDelay` (offscreen) can delay what you hear to match, at the cost of the same delay
-  in ChatGPT's answers. Off by default.
-- **Viseme quality.** HeadAudio's model is English; on Russian speech shapes are closer to amplitude (see US-003).
-- **Emotion from prosody (US-006).** Arousal/energy/tension track loudness, intonation, rate and brightness and are
-  usable; valence from audio alone is close to chance (its confidence is capped at 0.25 without a model, so the
-  smile barely moves). All thresholds are tuned on synthetic signals only: calibrate on a real mic and real ChatGPT
-  voice with `docs/US-006-calibration.md`. The user channel is also echo-prone on speakers; its weight is 0 while
-  the resolver says the assistant is speaking.
-- **VRM expression overrides.** `happy`/`sad`/`surprised` with `overrideMouth: blend` would scale visemes down by
-  their weight; `Avatar` pre-compensates visemes and blink. A model whose emotion presets `block` the mouth gets no
-  procedural emotion on them (warned once), since any weight would stop lip sync.
+  `AUDIO_RUNTIME_CONFIG.monitorDelay` (offscreen) can delay what you hear to match, at the cost of the same delay in
+  ChatGPT's answers. Off by default.
+- **Viseme quality.** HeadAudio's model is English; on Russian speech shapes are closer to amplitude.
+- **Emotion from prosody.** Arousal/energy/tension are usable; valence from audio alone is near chance (confidence
+  capped at 0.25 without a model). Thresholds are tuned on synthetic signals only. The user channel's weight is 0
+  while the assistant is speaking.
+- **Emotion model output mapping.** `InstalledModel.ts` reads arousal/valence as indices 0/1 of the model's first
+  output tensor with range [−1, 1]; the manifest's `outputNames` (`arousal`, `valence`) are not passed to the
+  runtime. This mapping has not been checked against the real model's outputs.
+- **Popup details.** *Cancel* during a download ends in the `error` state (with the abort message), not
+  `not-installed`. The popup shows the size as ~51 MB in one place and 48.3 MB (MiB) in another. A manifest change
+  leaves the previous model's Blob in IndexedDB.
+- **VRM expression overrides.** Presets with `overrideMouth: blend` are pre-compensated; a model whose emotion
+  presets `block` the mouth gets no procedural emotion on them (warned once).
 
 ## Tests
 
 ```bash
-npm test          # unit: protocol, TabSessions/ContentLifecycle idempotency, ChatGPTAdapter (DOM fixtures),
+npm test          # unit: protocol, manifest, TabSessions/ContentLifecycle idempotency, ChatGPTAdapter (DOM fixtures),
                   # ConversationSignalResolver, UserVoicePipeline (fake Web Audio graph), architecture rules
 npm run test:e2e  # builds dist/ in development mode, then Playwright with the unpacked extension
 ```
 
-E2E runs Chromium headless with the extension on a routed `https://chatgpt.com/` fixture (strict CSP). Two flags
-make it work without a human: `--allowlisted-extension-id=<id>` lets the SW's dev hook start `tabCapture`
-without a toolbar click, and Playwright's default `--mute-audio` is removed so the captured audio isn't silence.
-The audio test plays a speech-like signal in the page and checks it arrives as mouth weights through the real
-capture → offscreen → Port → content path. Set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` to use a preinstalled Chromium.
-What E2E can't cover: the real click (user gesture) path and the live chatgpt.com DOM.
+E2E runs Chromium headless with the extension on a routed `https://chatgpt.com/` fixture (strict CSP). Set
+`PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` to use a preinstalled Chromium. Two flags make it work without a human:
+`--allowlisted-extension-id=<id>` lets the service worker's dev hook start `tabCapture` without a toolbar click, and
+Playwright's default `--mute-audio` is removed so the captured audio isn't silence.
 
-`user-voice.spec.ts` runs with Chromium's fake microphone (`--use-fake-device-for-media-stream` +
-`--use-file-for-fake-audio-capture=<wav>%noloop`), the WAV generated by `tests/e2e/fakeMic.ts` with a fixed
-timeline (speech, silence, speech). `--use-fake-ui-for-media-stream` is deliberately absent: with it, tabCapture's
-stream id fails with "Requested device not found". The offscreen document can't prompt, so the test grants the
-microphone context-wide (Chromium refuses a grant for a `chrome-extension://` origin by name); the denial test skips
-that and checks the permission page opens and everything else keeps working. The VAD/pitch/baseline algorithms are
-unit-tested in `avatar/tests/unit/UserVoice.test.ts` (synthetic signals, 10/20/40 ms and 128-sample chunks).
+- `extension.spec.ts`: load, enable/disable, orb hide/restore, no duplicate runtimes on SPA navigation, real tab
+  audio → offscreen → Port → mouth, viseme analyser fallback, reload.
+- `user-voice.spec.ts`: Chromium's fake microphone (`--use-fake-device-for-media-stream` +
+  `--use-file-for-fake-audio-capture=<wav>%noloop`, WAV from `tests/e2e/fakeMic.ts`). `--use-fake-ui-for-media-stream`
+  is deliberately absent: with it, tabCapture's stream id fails with "Requested device not found". The test grants
+  the mic context-wide; the denial test checks the permission page opens and everything else keeps working.
+- `emotion.spec.ts`: assistant and user channels through to the mixer, interruption priority swap, debug switches;
+  local-model tests on WASM, WebGPU (SwiftShader: `--enable-unsafe-webgpu --use-webgpu-adapter=swiftshader`) and a
+  model that fails to load, using the `avatar/tests/fixtures/loudness-probe.onnx` plumbing fixture.
 
-`emotion.spec.ts` (US-006) plays a calm and an energetic synthetic voice in the page and checks the assistant channel
-through to the mixer (arousal differs, lip sync unaffected, silence decays smoothly), the user channel with the fake
-mic, the interruption priority swap and the debug switches. The model tests copy `dist/` with the loudness probe
-(`avatar/tests/fixtures/loudness-probe.onnx`, a plumbing fixture, not an emotion model) and check `ml-wasm`, `ml-webgpu`
-(SwiftShader Vulkan adapter via `--enable-unsafe-webgpu --use-webgpu-adapter=swiftshader`) and `fallback`.
+**Currently failing:** the three local-model tests in `emotion.spec.ts` package `emotion-model/model.json` into
+`dist/`, a path the runtime no longer reads (the model now comes only from IndexedDB via the installer). They fail
+waiting for `data-emotion-model` to become `ready`/`failed`. The installer itself (download, integrity, storage,
+Disable/Remove) has no automated tests.
+
+Not covered by E2E: the real toolbar/popup user-gesture path and the live chatgpt.com DOM.

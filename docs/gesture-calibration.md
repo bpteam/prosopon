@@ -1,4 +1,7 @@
-# US-008 gesture calibration (needs your eyes)
+# Gesture calibration (needs your eyes)
+
+Context: [PRODUCT.md §5.10](../PRODUCT.md#510-gestures), code and tunables:
+[avatar/README.md](../avatar/README.md#gestures). Rules: [AGENTS.md](../AGENTS.md).
 
 Amplitudes, rates and durations in `avatar/src/avatar/gesture/GestureConfig.ts` were set by reasoning, not by
 looking at the model. Budget: ~20 minutes.
