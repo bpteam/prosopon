@@ -80,6 +80,8 @@ export interface ConversationAutomation {
   ensureFreshChat(timeoutMs?: number): Promise<boolean>;
   /** Starts ChatGPT Voice (no-op when it runs). Resolves once the voice UI is up, false on timeout. */
   startVoice(timeoutMs?: number): Promise<boolean>;
+  /** The visible Voice session has its controls mounted and can safely receive a calibration prompt. */
+  isVoiceReady(): boolean;
   /** Mutes/unmutes ChatGPT's own microphone in the voice session. False when no such control was found. */
   setVoiceMicMuted(muted: boolean): Promise<boolean>;
   /** Types `text` into the composer and sends it. False when the composer or the send control was not found. */
@@ -124,7 +126,12 @@ export const CHATGPT_SELECTORS = {
     '[aria-label*="voice mode" i][role="dialog"]',
   ],
   /** Fallback evidence of a live session while the orb is momentarily unmounted (e.g. mid transition). */
-  sessionControl: ['button[aria-label="End Voice" i]', 'button[aria-label*="voice focus mode" i]'],
+  sessionControl: [
+    'button[aria-label="End Voice" i]',
+    'button[aria-label*="voice focus mode" i]',
+    'button[aria-label="Завершити сеанс у режимі «Голос»" i]',
+    'button[aria-label="Завершить сеанс в голосовом режиме" i]',
+  ],
   /**
    * Production Voice Mode wraps its complete transcript in the first data selector; the logged-out shell exposes
    * the ARIA-region fallback. Both are roots, not turn selectors: the assistant turn is identified below.
@@ -141,8 +148,8 @@ export const CHATGPT_SELECTORS = {
   /** Voice Mode keeps its immutable message UUID on this descendant, not on the turn wrapper. */
   messageId: ['[data-chatgpt-selection-message-id]'],
 
-  // --- Calibration wizard only (Developer Mode). NONE of these was verified against production chatgpt.com: they
-  // --- are the long-standing attributes as publicly described. Manual check: docs/calibration-wizard.md.
+  // --- Calibration wizard only (Developer Mode). The stable data attributes are preferred; localized accessible
+  // --- names below are the observed fallbacks. Keep the fixture and docs/calibration-wizard.md in sync.
 
   /** Any turn of the conversation (empty-chat check); the Voice Mode turn key per assistantMessage above. */
   anyMessage: ['[data-message-author-role]', '[data-content-search-unit-key$=":assistant"]', '[data-content-search-unit-key$=":user"]'],
@@ -156,9 +163,22 @@ export const CHATGPT_SELECTORS = {
     'button[aria-label="Start voice mode" i]',
     'button[aria-label*="voice mode" i]:not([aria-label*="focus" i])',
     'button[aria-label="Voice" i]',
+    'button[aria-label="Почати голосову розмову" i]',
+    'button[aria-label="Начать голосовой разговор" i]',
+    'button[aria-label="Iniciar conversación de voz" i]',
   ],
   /** ChatGPT's own mic mute in a voice session (aria-pressed or the label tells the state). */
-  voiceMute: ['button[aria-label="Mute microphone" i]', 'button[aria-label="Unmute microphone" i]', 'button[aria-label*="mute" i]'],
+  voiceMute: [
+    'button[aria-label="Mute microphone" i]',
+    'button[aria-label="Unmute microphone" i]',
+    'button[aria-label*="mute" i]',
+    'button[aria-label="Вимкнути мікрофон" i]',
+    'button[aria-label="Увімкнути мікрофон" i]',
+    'button[aria-label="Отключить микрофон" i]',
+    'button[aria-label="Включить микрофон" i]',
+    'button[aria-label*="silenciar" i]',
+    'button[aria-label*="activar micr" i]',
+  ],
   /** A checked option in a voice picker (menu, radio group, listbox) that may be on the page. */
   selectedOption: ['[role="menuitemradio"][aria-checked="true"]', '[role="radio"][aria-checked="true"]', '[role="option"][aria-selected="true"]'],
   /** Elements whose label may name the voice ("Voice: Sol"). */
@@ -444,7 +464,7 @@ export class ChatGPTAdapter implements ConversationUiAdapter, ConversationAutoma
 
   async ensureFreshChat(timeoutMs = 8000): Promise<boolean> {
     if (this.isConversationEmpty() && this.isComposerReady()) return true;
-    const button = this.first(CHATGPT_SELECTORS.newChat);
+    const button = this.findNewChat();
     if (!button) return false;
     button.click();
     return this.waitFor(() => this.isConversationEmpty() && this.isComposerReady(), timeoutMs);
@@ -458,15 +478,21 @@ export class ChatGPTAdapter implements ConversationUiAdapter, ConversationAutoma
     return this.waitFor(() => this.isVoiceModeActive(), timeoutMs);
   }
 
+  isVoiceReady(): boolean {
+    // The orb is mounted before the rest of the Voice controls on some ChatGPT builds. A calibration must not
+    // send its first prompt into that transition (the startup chime is tab audio too).
+    return this.isVoiceModeActive() && this.first(CHATGPT_SELECTORS.voiceMute) !== null && this.isComposerReady();
+  }
+
   async setVoiceMicMuted(muted: boolean): Promise<boolean> {
     const button = this.first(CHATGPT_SELECTORS.voiceMute);
     if (!button) return false;
-    const pressed = button.getAttribute('aria-pressed');
-    const label = button.getAttribute('aria-label') ?? '';
-    // "Unmute microphone" is shown while muted; aria-pressed, when present, is the mute state.
-    const isMuted = pressed !== null ? pressed === 'true' : /unmute/i.test(label);
+    const isMuted = voiceMicMuted(button);
     if (isMuted !== muted) button.click();
-    return true;
+    return this.waitFor(() => {
+      const current = this.first(CHATGPT_SELECTORS.voiceMute);
+      return current !== null && voiceMicMuted(current) === muted;
+    }, 1000);
   }
 
   async sendMessage(text: string, timeoutMs = 5000): Promise<boolean> {
@@ -488,13 +514,24 @@ export class ChatGPTAdapter implements ConversationUiAdapter, ConversationAutoma
         composer.dispatchEvent(new (this.win().InputEvent)('input', { bubbles: true, inputType: 'insertText', data: text }));
       }
     }
+    const form = composer.closest('form');
+    if (this.first(CHATGPT_SELECTORS.sendButton) === null && form) {
+      form.requestSubmit();
+      return this.waitFor(() => composerText(composer).trim() === '', Math.min(timeoutMs, 2000));
+    }
     const ready = await this.waitFor(() => {
       const b = this.first(CHATGPT_SELECTORS.sendButton);
       return b !== null && !(b as HTMLButtonElement).disabled;
     }, timeoutMs);
-    if (!ready) return false;
-    this.first(CHATGPT_SELECTORS.sendButton)!.click();
-    return true;
+    if (ready) {
+      this.first(CHATGPT_SELECTORS.sendButton)!.click();
+      return this.waitFor(() => composerText(composer).trim() === '', Math.min(timeoutMs, 2000));
+    }
+    // Current Voice composer has no Send button. Its native form submission is the same user-visible action as
+    // Enter, unlike inventing a DOM-specific click target. A cleared composer confirms React accepted the input.
+    if (!form) return false;
+    form.requestSubmit();
+    return this.waitFor(() => composerText(composer).trim() === '', Math.min(timeoutMs, 2000));
   }
 
   async waitForAssistantMessage(afterCount: number, timeoutMs = 20000): Promise<AssistantReply | null> {
@@ -514,6 +551,14 @@ export class ChatGPTAdapter implements ConversationUiAdapter, ConversationAutoma
     const out: HTMLElement[] = [];
     for (const selector of selectors) out.push(...this.doc.querySelectorAll<HTMLElement>(selector));
     return out;
+  }
+
+  /** New Chat has no stable data attribute in the current localized shell, so match its accessible text exactly. */
+  private findNewChat(): HTMLElement | null {
+    const stable = this.first(CHATGPT_SELECTORS.newChat);
+    if (stable) return stable;
+    const names = new Set(['new chat', 'новий чат', 'новый чат', 'nuevo chat']);
+    return [...this.doc.querySelectorAll<HTMLElement>('button, a')].find((el) => names.has((el.getAttribute('aria-label') ?? el.textContent ?? '').trim().toLocaleLowerCase())) ?? null;
   }
 
   private win(): Window & typeof globalThis {
@@ -621,6 +666,18 @@ export class ChatGPTAdapter implements ConversationUiAdapter, ConversationAutoma
       else style.removeProperty('visibility');
     };
   }
+}
+
+function composerText(composer: HTMLElement): string {
+  const TextArea = composer.ownerDocument.defaultView?.HTMLTextAreaElement ?? HTMLTextAreaElement;
+  return composer instanceof TextArea ? composer.value : composer.textContent ?? '';
+}
+
+/** The label tells the *next* action: "Unmute" / "Увімкнути" means the mic is already muted. */
+function voiceMicMuted(button: HTMLElement): boolean {
+  const pressed = button.getAttribute('aria-pressed');
+  if (pressed !== null) return pressed === 'true';
+  return /unmute|увімкнути|включить|activar/i.test(button.getAttribute('aria-label') ?? '');
 }
 
 /** The known voice named in `text` ("Sol", "Voice: sol"), else null. */

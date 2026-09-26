@@ -21,12 +21,12 @@
     <!-- Mimics the parts of chatgpt.com that ChatGPTAdapter knows; see CHATGPT_SELECTORS. -->
     <div id="app">
       <div id="thread" data-chatgpt-conversation-selection-target="true"><p>Fixture conversation</p></div>
-      <!-- Calibration automation (unverified against production, see docs/calibration-wizard.md). -->
-      <button type="button" data-testid="create-new-chat-button" id="new-chat">New chat</button>
+      <!-- Calibration automation: current localized ChatGPT Voice shape (see docs/calibration-wizard.md). -->
+      <button type="button" id="new-chat">Новий чат</button>
       <form id="composer">
         <textarea id="prompt-textarea" aria-label="Message"></textarea>
-        <button type="button" data-testid="send-button" id="send" disabled>Send</button>
-        <button type="button" data-testid="composer-speech-button" aria-label="Start voice mode" id="open-voice">Voice</button>
+        <button type="submit" id="send" disabled>Send</button>
+        <button type="button" aria-label="Почати голосову розмову" id="open-voice">Voice</button>
       </form>
     </div>
     <script>
@@ -34,7 +34,9 @@
       const composer = document.getElementById('prompt-textarea');
       const send = document.getElementById('send');
       composer.addEventListener('input', () => (send.disabled = composer.value.trim() === ''));
-      send.addEventListener('click', () => {
+      document.getElementById('composer').addEventListener('submit', (event) => {
+        event.preventDefault();
+        if (send.disabled) return;
         const text = composer.value;
         composer.value = '';
         send.disabled = true;
@@ -75,14 +77,14 @@
           }
         },
         // Mirrors production chatgpt.com (2026-09-26): a decorative aria-hidden orb inside its button, inside
-        // the focus-mode container, plus the End Voice control. React unmounts all of it when voice ends.
+        // the focus-mode container, plus the localized end-session control. React unmounts all of it when voice ends.
         openVoice() {
           if (document.querySelector('[data-thread-focus-mode]')) return;
           const container = document.createElement('div');
           container.dataset.threadFocusMode = 'true';
           const button = document.createElement('button');
           button.type = 'button';
-          button.setAttribute('aria-label', 'Exit voice focus mode');
+          button.setAttribute('aria-label', 'Перейти в режим фокусування на голосі');
           button.setAttribute('aria-pressed', 'true');
           const orb = document.createElement('div');
           orb.dataset.realtimeVoiceOrb = 'true';
@@ -91,16 +93,16 @@
           button.append(orb);
           const close = document.createElement('button');
           close.id = 'close-voice';
-          close.setAttribute('aria-label', 'End Voice');
+          close.setAttribute('aria-label', 'Завершити сеанс у режимі «Голос»');
           close.textContent = 'End';
           close.onclick = () => window.fixture.closeVoice();
           const mute = document.createElement('button');
           mute.type = 'button';
           mute.id = 'mute-voice';
-          mute.setAttribute('aria-label', 'Mute microphone');
+          mute.setAttribute('aria-label', 'Вимкнути мікрофон');
           mute.onclick = () => {
             window.fixture.muted = !window.fixture.muted;
-            mute.setAttribute('aria-label', window.fixture.muted ? 'Unmute microphone' : 'Mute microphone');
+            mute.setAttribute('aria-label', window.fixture.muted ? 'Увімкнути мікрофон' : 'Вимкнути мікрофон');
           };
           const voiceName = document.createElement('span');
           voiceName.setAttribute('aria-label', `Voice: ${window.fixture.voice}`);

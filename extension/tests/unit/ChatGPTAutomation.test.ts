@@ -93,6 +93,25 @@ describe('ChatGPTAdapter automation', () => {
     expect(adapter.detectVoiceMode()).toBe('realtime');
   });
 
+  it('drives the current localized Voice controls and waits until they are ready', async () => {
+    const composer = document.createElement('div');
+    composer.contentEditable = 'true';
+    composer.setAttribute('role', 'textbox');
+    const start = document.createElement('button');
+    start.setAttribute('aria-label', 'Почати голосову розмову');
+    start.addEventListener('click', () => {
+      const orb = document.createElement('div');
+      orb.dataset.realtimeVoiceOrb = 'true';
+      const mute = document.createElement('button');
+      mute.setAttribute('aria-label', 'Вимкнути мікрофон');
+      document.body.append(orb, mute);
+    });
+    document.body.append(composer, start);
+    const adapter = new ChatGPTAdapter(document);
+    await expect(adapter.startVoice(1000)).resolves.toBe(true);
+    expect(adapter.isVoiceReady()).toBe(true);
+  });
+
   it('mutes by aria-pressed or by label and never toggles twice', async () => {
     const mute = document.createElement('button');
     mute.setAttribute('aria-label', 'Mute microphone');
@@ -110,6 +129,29 @@ describe('ChatGPTAdapter automation', () => {
     expect(clicks).toBe(2);
     mute.remove();
     await expect(adapter.setVoiceMicMuted(true)).resolves.toBe(false);
+  });
+
+  it('understands the localized mute state and submits a Voice composer with no Send button', async () => {
+    const form = document.createElement('form');
+    const composer = document.createElement('div');
+    composer.contentEditable = 'true';
+    composer.setAttribute('role', 'textbox');
+    const mute = document.createElement('button');
+    mute.setAttribute('aria-label', 'Вимкнути мікрофон');
+    mute.addEventListener('click', () => mute.setAttribute('aria-label', mute.getAttribute('aria-label') === 'Вимкнути мікрофон' ? 'Увімкнути мікрофон' : 'Вимкнути мікрофон'));
+    let submitted = '';
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      submitted = composer.textContent ?? '';
+      composer.textContent = '';
+    });
+    form.append(composer);
+    document.body.append(form, mute);
+    const adapter = new ChatGPTAdapter(document);
+    await expect(adapter.setVoiceMicMuted(true)).resolves.toBe(true);
+    await expect(adapter.setVoiceMicMuted(true)).resolves.toBe(true);
+    await expect(adapter.sendMessage('Тестовая фраза')).resolves.toBe(true);
+    expect(submitted).toBe('Тестовая фраза');
   });
 
   it('detects the voice from a checked option (known names only), a label, or stored settings', () => {

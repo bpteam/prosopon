@@ -1,5 +1,7 @@
 import { h } from '../shared/dom';
 import type { CalibrationRunner, CalibrationView } from '../../calibration/CalibrationRunner';
+import { CALIBRATION_LANGUAGES, type CalibrationLanguage } from '../../calibration/types';
+import type { ScenarioOptions } from '../../calibration/scenarios';
 import type { DevBridge } from './DevBridge';
 import type { Panel } from './panels';
 import { card, keyValue } from './widgets';
@@ -8,7 +10,7 @@ import { card, keyValue } from './widgets';
 export interface CalibrationSlot {
   readonly runner: CalibrationRunner | null;
   /** A new runner (the previous one must have ended). */
-  create(): CalibrationRunner;
+  create(options?: ScenarioOptions): CalibrationRunner;
 }
 
 export const CALIBRATION_CSS = `
@@ -25,6 +27,8 @@ export const CALIBRATION_CSS = `
 .cal-voices { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--gap-s); }
 .cal-lines { margin: 0; padding-left: 18px; }
 .cal-error { color: var(--red, #e5484d); }
+.cal-languages { display: flex; flex-wrap: wrap; gap: var(--gap-s); }
+.cal-languages label { display: inline-flex; align-items: center; gap: 5px; }
 `;
 
 /**
@@ -37,6 +41,9 @@ export function calibrationPanel(doc: Document, bridge: DevBridge, slot: Calibra
   let off: (() => void) | null = null;
   let sinceDetect = Infinity;
   let flagOpen = false;
+  // A focused Russian run is the useful and safe default. Development/E2E scenario overrides retain their own
+  // language set so a deliberately reduced run remains reduced until the user changes a checkbox.
+  let languages: CalibrationLanguage[] = [...(bridge.calibration.scenarioOptions?.languages ?? ['ru'])];
 
   const kv = {
     voice: keyValue(doc, 'Current voice'),
@@ -57,7 +64,8 @@ export function calibrationPanel(doc: Document, bridge: DevBridge, slot: Calibra
   }
 
   function start(): void {
-    const runner = slot.create();
+    if (!languages.length) return;
+    const runner = slot.create({ languages, userLanguages: languages });
     attach(runner);
     void runner.start();
   }
@@ -67,7 +75,7 @@ export function calibrationPanel(doc: Document, bridge: DevBridge, slot: Calibra
     const e = bridge.calibration.chat.detectVoiceEnvironment();
     kv.voice.set(e.voiceName ?? 'Detecting…');
     kv.mode.set(e.voiceMode ?? 'Detecting…');
-    kv.languages.set('RU UK EN ES');
+    kv.languages.set(languages.map((l) => l.toUpperCase()).join(' '));
     kv.mic.set(env.mic.state === 'on' ? 'Ready' : env.mic.state === 'off' ? 'Off (will be turned on)' : `Unavailable (${env.mic.state})`);
     kv.capture.set(env.offscreenConnected ? 'Ready' : 'Not capturing');
     root.replaceChildren(
@@ -77,6 +85,25 @@ export function calibrationPanel(doc: Document, bridge: DevBridge, slot: Calibra
         ...Object.values(kv).map((x) => x.el),
         h(doc, 'p', { class: 'secondary' }, 'Calibration will temporarily record audio locally for analysis. Nothing is uploaded.'),
         h(doc, 'p', { class: 'secondary' }, 'Use headphones: ChatGPT Voice hears your speakers.'),
+        h(
+          doc,
+          'fieldset',
+          { class: 'cal-languages', 'data-testid': 'calibration-languages' },
+          h(doc, 'legend', {}, 'Languages to calibrate'),
+          ...CALIBRATION_LANGUAGES.map((language) => {
+            const input = h(doc, 'input', {
+              type: 'checkbox',
+              value: language,
+              checked: languages.includes(language),
+              onchange: () => {
+                languages = input.checked ? [...languages, language] : languages.filter((l) => l !== language);
+                idle();
+              },
+              'data-language': language,
+            });
+            return h(doc, 'label', {}, input, language.toUpperCase());
+          }),
+        ),
         h(doc, 'div', { class: 'cal-row' }, button('Start calibration', start, { class: 'cal-primary', 'data-testid': 'calibration-start' })),
       ),
     );

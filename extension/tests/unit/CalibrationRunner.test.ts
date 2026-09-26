@@ -80,13 +80,14 @@ describe('CalibrationRunner', () => {
     expect(runner.result!.results[0]!.verdicts[0]).toMatchObject({ verdict: 'GESTURE_POLICY_SUPPRESSION', detail: 'cooldown' });
   }, 60_000);
 
-  it('without reply text on the page reports NO_REPLY_TEXT, not a semantic failure', async () => {
+  it('does not accept audio without a new reply turn: a startup sound must not become a calibration sample', async () => {
     const { world, runner } = setup({ renderText: false }, buildScenario({ languages: ['en'], user: false, categories: ['question.normal'] }));
     await runAll(world, runner);
     const r = runner.result!.results[0]!;
-    expect(r.valid).toBe(true);
+    expect(r.valid).toBe(false);
     expect(r.textSource).toBe('none');
-    expect(r.verdicts[0]!.verdict).toBe('NO_REPLY_TEXT');
+    expect(r.invalidReason).toBe('assistant-audio-without-reply-text');
+    expect(r.verdicts[0]!.verdict).toBe('INVALID_SAMPLE');
   }, 60_000);
 
   it('retries once, marks the sample invalid and stops sending prompts when Voice never speaks typed messages', async () => {

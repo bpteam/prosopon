@@ -404,11 +404,12 @@ Debug APIs are development-only and must not become runtime dependencies.
   Whether ChatGPT's own echo cancellation still works while the tab is captured is unverified. Headphones are the
   safe setup.
 - **Calibration.** VAD, pitch, prosody and gesture thresholds are tuned on synthetic signals. The calibration
-  wizard collects real-voice data but tunes nothing; its ChatGPT automation (typing a prompt during Voice, the
-  composer/send/new-chat/voice/mute selectors, voice-name detection, reply text in voice mode) is tested on the
-  fixture only and is unverified on production: manual checks in
-  [docs/calibration-wizard.md](docs/calibration-wizard.md#manual-checks-on-real-chatgptcom). Other procedures are
-  manual ([docs/](docs/)).
+  wizard collects real-voice data but tunes nothing. It arms assistant samples only after Voice is ready and quiet,
+  and accepts one only when sustained tab speech has a new rendered assistant turn; startup chimes and tab noise
+  cannot become samples. Its ChatGPT automation (typing a prompt during Voice, the composer/send/new-chat/voice/mute
+  selectors, voice-name detection, reply text in voice mode) still has fixture-only paths and needs the real-page
+  checks in [docs/calibration-wizard.md](docs/calibration-wizard.md#manual-checks-on-real-chatgptcom). Other
+  procedures are manual ([docs/](docs/)).
 - **Viseme quality.** HeadAudio's model is English; the wLipSync profile is one speaker. Neither is validated on
   Russian or ChatGPT voices.
 - **Latency.** Mouth lags audio by the analysis window + frame interval; `monitorDelay` trades it for audible delay.

@@ -133,8 +133,9 @@ never reaches `src/ui`. Escape closes the focused window; all windows are `role=
 
 ### Calibration wizard
 
-Developer Tools → *Calibration*: Start → automatic scripted session with ChatGPT Voice → Export ZIP. Procedure,
-bundle contents and manual checks: [../docs/calibration-wizard.md](../docs/calibration-wizard.md).
+Developer Tools → *Calibration*: select one or more languages (Russian by default) → Start → automatic scripted
+session with ChatGPT Voice → Export ZIP. Procedure, bundle contents and manual checks:
+[../docs/calibration-wizard.md](../docs/calibration-wizard.md).
 
 - `src/calibration/` (in the Dev UI chunk; imports no avatar runtime, renderer or DOM, architecture-tested):
   `CalibrationRunner` (resumable phase machine driven by `FrameClock`, ticked from `DevToolsHandle.frame`),
@@ -368,9 +369,11 @@ IndexedDB. The `PROSOPON_EMBED_MODEL=1 …` script syntax needs a POSIX shell (u
 - **Semantic layer.** The assistant-message selector and the reply text in voice mode are unverified on production
   (fixture only); if ChatGPT doesn't render the reply while it speaks, semantic accents are silent in voice mode.
   Timing is a fixed-rate estimate, not alignment. See [../docs/semantic-calibration.md](../docs/semantic-calibration.md).
-- **Calibration wizard automation** (`ConversationAutomation` in `ChatGPTAdapter`): typing into the composer during
-  a voice session, the send/new-chat/voice/mute selectors and voice-name detection are guesses tested on the fixture
-  only. See [../docs/calibration-wizard.md](../docs/calibration-wizard.md#manual-checks-on-real-chatgptcom).
+- **Calibration wizard automation** (`ConversationAutomation` in `ChatGPTAdapter`): current Voice uses a readiness
+  barrier (controls present + quiet startup), confirms mute state and accepts a reply only after sustained audio and
+  a new rendered assistant turn. Current Ukrainian Start Voice and mute labels are covered alongside stable data
+  attributes; send/new-chat and the remaining locales still need the real-page checks in
+  [../docs/calibration-wizard.md](../docs/calibration-wizard.md#manual-checks-on-real-chatgptcom).
 - **VRM expression overrides.** Presets with `overrideMouth: blend` are pre-compensated; a model whose emotion
   presets `block` the mouth gets no procedural emotion on them (warned once).
 

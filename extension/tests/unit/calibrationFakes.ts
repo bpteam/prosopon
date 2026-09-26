@@ -144,6 +144,7 @@ export function createWorld(o: WorldOptions = {}) {
       if (opts.voiceStarts) voice = true;
       return voice;
     },
+    isVoiceReady: () => voice,
     setVoiceMicMuted: async (m) => {
       muteCalls.push(m);
       return true;

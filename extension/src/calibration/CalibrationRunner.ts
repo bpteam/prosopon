@@ -93,6 +93,11 @@ export const DEFAULT_TIMING = Object.freeze({
   interruptOnset: 8,
   setupReply: 30,
   voiceStart: 12,
+  /** Voice controls must be mounted and tab audio quiet before the first scripted prompt is armed. */
+  voiceReady: 10,
+  voiceQuiet: 1.2,
+  /** A click/chime is not a reply: assistant audio must remain present this long. */
+  assistantMinSpeech: 0.7,
   micOn: 10,
 });
 
@@ -241,7 +246,9 @@ export class CalibrationRunner {
     // ChatGPT's own microphone stays muted while the wizard talks to it and while you speak test phrases, so neither
     // your room nor your phrases interrupt or prompt it. Interruption tests unmute it.
     this.muted = await this.host.chat.setVoiceMicMuted(true).catch(() => false);
+    if (!this.muted) throw new Error("Couldn't mute ChatGPT's microphone. Calibration would be contaminated by room speech.");
     this.trace.event('recovery', { chatgptMicMuted: this.muted });
+    await this.waitForVoiceToSettle();
 
     for (const step of this.scenario.steps) await this.runStep(step);
 
@@ -308,10 +315,14 @@ export class CalibrationRunner {
   /** Voice must be running; reopen it once, then ask the user. */
   private async ensureVoice(first = false): Promise<void> {
     const chat = this.host.chat;
-    if (chat.isVoiceModeActive()) return;
+    if (chat.isVoiceModeActive()) {
+      await this.waitForVoiceReady();
+      return;
+    }
     if (!first) this.trace?.event('recovery', { voiceClosed: true });
     if (await chat.startVoice(this.timing.voiceStart * 1000)) {
       if (!first && this.muted) await chat.setVoiceMicMuted(true).catch(() => false);
+      await this.waitForVoiceReady();
       return;
     }
     const phase = this.stateView.phase;
@@ -324,6 +335,22 @@ export class CalibrationRunner {
     );
     this.set({ phase });
     if (!first && this.muted) await chat.setVoiceMicMuted(true).catch(() => false);
+    await this.waitForVoiceReady();
+  }
+
+  private async waitForVoiceReady(): Promise<void> {
+    const ready = await this.clock.until(() => this.host.chat.isVoiceReady(), this.timing.voiceReady);
+    if (!ready) throw new Error("ChatGPT Voice opened, but its controls did not become ready.");
+  }
+
+  /** Drains the Voice startup chime before an assistant sample can be armed. */
+  private async waitForVoiceToSettle(): Promise<void> {
+    const quiet = await this.clock.held(
+      () => this.host.chat.isVoiceReady() && !this.frame().signals.assistantSpeaking,
+      this.timing.voiceQuiet,
+      this.timing.voiceReady,
+    );
+    if (!quiet) throw new Error('ChatGPT Voice did not become quiet after startup. Restart Voice and try again.');
   }
 
   /** Pause until `done()` holds, retrying `attempt` whenever the user presses the action. */
@@ -416,6 +443,7 @@ export class CalibrationRunner {
     await this.ensureVoice();
     await this.clock.held(() => !this.frame().signals.assistantSpeaking, this.timing.quietBeforePrompt, 20);
     const before = chat.countAssistantMessages();
+    const crosstalkBefore = this.frame().crosstalkEvents;
     await this.clip(rec, clipId, 'assistant', 'start');
     try {
       if (!(await chat.sendMessage(step.prompt!))) {
@@ -423,14 +451,23 @@ export class CalibrationRunner {
         return 'failed';
       }
       this.trace!.event('prompt-sent', { chars: step.prompt!.length });
-      if (!(await this.clock.until(() => this.frame().signals.assistantSpeaking, this.timing.assistantStart))) {
-        rec.invalidReason = chat.countAssistantMessages() > before ? 'no-assistant-audio' : 'assistant-did-not-answer';
+      const onset = await this.clock.until(() => this.frame().signals.assistantSpeaking || !chat.isVoiceModeActive(), this.timing.assistantStart);
+      const started = onset && chat.isVoiceModeActive() && (await this.clock.held(() => this.frame().signals.assistantSpeaking, this.timing.assistantMinSpeech, this.timing.assistantStart));
+      if (!started || !chat.isVoiceModeActive() || !this.frame().signals.assistantSpeaking) {
+        rec.invalidReason = !chat.isVoiceModeActive() ? 'voice-session-ended' : chat.countAssistantMessages() > before ? 'no-assistant-audio' : 'assistant-did-not-answer';
         this.captureText(rec, before);
         return 'failed';
       }
       await this.clock.held(() => !this.frame().signals.assistantSpeaking, this.timing.assistantEndSilence, this.timing.assistantMaxTurn);
+      if (this.frame().crosstalkEvents > crosstalkBefore) {
+        rec.invalidReason = 'external-voice-during-assistant-sample';
+        return 'failed';
+      }
       await this.clock.until(() => this.frame().gesture.type === null, this.timing.gestureRelease);
-      await this.clock.until(() => chat.countAssistantMessages() > before, this.timing.textGrace);
+      if (!(await this.clock.until(() => chat.countAssistantMessages() > before, this.timing.textGrace))) {
+        rec.invalidReason = 'assistant-audio-without-reply-text';
+        return 'failed';
+      }
       this.captureText(rec, before);
       return 'ok';
     } finally {
@@ -507,8 +544,9 @@ export class CalibrationRunner {
             continue;
           }
           this.trace!.event('prompt-sent', { chars: step.prompt!.length, interruption: true });
-          if (!(await this.clock.until(() => this.frame().signals.assistantSpeaking, this.timing.assistantStart))) {
-            rec.invalidReason = 'no-assistant-audio';
+          const onset = await this.clock.until(() => this.frame().signals.assistantSpeaking || !chat.isVoiceModeActive(), this.timing.assistantStart);
+          if (!onset || !chat.isVoiceModeActive() || !(await this.clock.held(() => this.frame().signals.assistantSpeaking, this.timing.assistantMinSpeech, this.timing.assistantStart))) {
+            rec.invalidReason = !chat.isVoiceModeActive() ? 'voice-session-ended' : 'no-assistant-audio';
             continue;
           }
           await this.clock.sleep(this.timing.interruptLead);

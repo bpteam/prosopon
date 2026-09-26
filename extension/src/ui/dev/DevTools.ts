@@ -69,8 +69,12 @@ export class DevTools implements DevToolsHandle {
       get runner() {
         return tools.calibrationRunner;
       },
-      create: () => {
-        this.calibrationRunner = new CalibrationRunner({ host: bridge.calibration, scenario: buildScenario(bridge.calibration.scenarioOptions) });
+      create: (options) => {
+        this.calibrationRunner = new CalibrationRunner({
+          host: bridge.calibration,
+          // UI selects languages; a development override can still restrict categories or user steps.
+          scenario: buildScenario({ ...bridge.calibration.scenarioOptions, ...options }),
+        });
         return this.calibrationRunner;
       },
     };
