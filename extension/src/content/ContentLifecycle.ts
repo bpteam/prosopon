@@ -1,8 +1,10 @@
-import type { ExtensionMessage, ExtensionTabState } from '../shared/messages';
+import type { ExtensionMessage, ExtensionPayload, ExtensionTabState } from '../shared/messages';
 import type { AvatarRuntimeHandle } from './avatar-runtime';
 
 export interface FrameLink {
   disconnect(): void;
+  /** Development only: sends a message back over the lip-sync port (see 'debug:analyzer'). */
+  send?(payload: ExtensionPayload): void;
 }
 
 export interface ContentLifecycleDeps {
@@ -63,6 +65,11 @@ export class ContentLifecycle {
       this.teardown();
     }
     // 'starting': keep whatever is there; the enabled/error state follows.
+  }
+
+  /** Development only: sends a payload to the offscreen runtime, if the port is open. */
+  send(payload: ExtensionPayload): void {
+    this.link?.send?.(payload);
   }
 
   /** Final teardown (orphaned script, page unload). */

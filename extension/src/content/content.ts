@@ -49,7 +49,7 @@ function start(): void {
         if (msg) onMessage(msg);
       });
       port.onDisconnect.addListener(onDisconnect);
-      return { disconnect: () => port.disconnect() };
+      return { disconnect: () => port.disconnect(), send: (payload) => port.postMessage(message(payload)) };
     },
     async requestState() {
       if (!isExtensionAlive()) return null;
@@ -66,8 +66,19 @@ function start(): void {
   };
   const lifecycle = new ContentLifecycle(deps);
 
+  // Development only: a page-world hook for driving the audio runtime from an integration test on the real site.
+  //   document.dispatchEvent(new CustomEvent('prosopon:debug', { detail: { analyzer: 'none' } }))
+  const onDebugEvent = (event: Event) => {
+    const choice = (event as CustomEvent<{ analyzer?: unknown }>).detail?.analyzer;
+    if (choice === 'headaudio' || choice === 'wlipsync' || choice === 'none') {
+      lifecycle.send({ type: 'debug:analyzer', choice });
+    }
+  };
+  if (import.meta.env.DEV) document.addEventListener('prosopon:debug', onDebugEvent);
+
   const onTakeover = () => {
     document.removeEventListener(TAKEOVER_EVENT, onTakeover);
+    document.removeEventListener('prosopon:debug', onDebugEvent);
     chrome.runtime.onMessage.removeListener(onRuntimeMessage);
     lifecycle.dispose();
   };

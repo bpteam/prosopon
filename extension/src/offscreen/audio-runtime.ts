@@ -92,6 +92,13 @@ class CaptureSession {
   addPort(port: chrome.runtime.Port): void {
     this.ports.add(port);
     port.onDisconnect.addListener(() => this.ports.delete(port));
+    if (import.meta.env.DEV) {
+      // Development only: lets a test drive the analyser (including turning it off) on a live capture.
+      port.onMessage.addListener((raw) => {
+        const msg = parseMessage(raw);
+        if (msg?.type === 'debug:analyzer') this.host.select(msg.choice);
+      });
+    }
     this.sinceStatus = Infinity; // new listener: send the status right away
   }
 

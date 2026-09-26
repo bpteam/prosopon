@@ -23,24 +23,40 @@ export interface VoiceUiSnapshot {
 }
 
 /**
- * ChatGPT's DOM, in one place. These selectors are NOT verified against the live chatgpt.com voice mode (it isn't
- * reachable from CI): they are best guesses to be updated from DevTools, and E2E fixtures mirror them. When none
- * matches, voice mode reads as inactive: the orb stays visible and the avatar stays in its fallback position.
- * Order matters: the first match wins.
+ * ChatGPT's DOM, in one place. Verified against production chatgpt.com voice mode (2026-09-26): the live voice
+ * session renders one orb element carrying `data-realtime-voice-orb`, both in the composer (112px) and in voice
+ * focus mode (256px); the orb is absent from the DOM when no voice session is running. Order matters: the first
+ * match wins. Older entries are kept as fallbacks for other ChatGPT builds.
  */
 export const CHATGPT_SELECTORS = {
-  voiceContainer: [
+  /**
+   * The site's voice visual. Its presence is what "voice mode is active" means: React unmounts it when the
+   * session ends. `data-realtime-voice-orb` and `data-testid` are stable attributes, not generated classes.
+   */
+  orb: [
+    '[data-realtime-voice-orb]',
+    '[data-testid="avatar-overlay-voice-orb"]',
+    '[data-avatar-mascot="true"]',
+    '[data-testid="voice-orb"]',
+    '[data-testid*="orb" i]',
+  ],
+  /**
+   * The layout box the avatar anchors to, looked up from the orb upwards. Production has no voice dialog: in
+   * focus mode the nearest stable ancestor is `[data-thread-focus-mode]`; in the composer there is none, and the
+   * orb's own button is used.
+   */
+  container: [
+    '[data-thread-focus-mode]',
     '[data-testid="voice-mode-container"]',
     '[data-testid="voice-mode"]',
-    '[data-testid*="voice-mode" i]',
     '[aria-label*="voice mode" i][role="dialog"]',
   ],
-  /** Looked up inside the voice container. */
-  orb: ['[data-testid="voice-orb"]', '[data-testid*="orb" i]', 'canvas'],
+  /** Fallback evidence of a live session while the orb is momentarily unmounted (e.g. mid transition). */
+  sessionControl: ['button[aria-label="End Voice" i]', 'button[aria-label*="voice focus mode" i]'],
 } as const;
 
 /** Attributes whose changes can show or hide the voice UI. `class` is left out: ChatGPT rewrites it constantly. */
-const OBSERVED_ATTRIBUTES = ['data-testid', 'hidden', 'aria-hidden', 'aria-label', 'role'];
+const OBSERVED_ATTRIBUTES = ['data-testid', 'data-realtime-voice-orb', 'data-thread-focus-mode', 'hidden', 'aria-hidden', 'aria-label', 'role'];
 
 const HIDDEN_MARK = 'data-prosopon-hidden';
 
@@ -48,29 +64,51 @@ export class ChatGPTAdapter implements ConversationUiAdapter {
   constructor(private readonly doc: Document = document) {}
 
   isVoiceModeActive(): boolean {
-    return this.findVoiceContainer() !== null;
+    return this.findOrb() !== null || this.findSessionControl() !== null;
   }
 
-  findVoiceContainer(): HTMLElement | null {
-    for (const selector of CHATGPT_SELECTORS.voiceContainer) {
+  /**
+   * The box to anchor to: the orb's nearest known container, else the button wrapping the orb, else the orb.
+   * Without an orb, only a document-wide container counts (and only while a session control says a session runs).
+   */
+  findVoiceContainer(orb: HTMLElement | null = this.findOrb()): HTMLElement | null {
+    if (orb) {
+      for (const selector of CHATGPT_SELECTORS.container) {
+        const el = orb.closest<HTMLElement>(selector);
+        if (el) return el;
+      }
+      return orb.closest<HTMLElement>('button') ?? orb;
+    }
+    if (this.findSessionControl() === null) return null;
+    for (const selector of CHATGPT_SELECTORS.container) {
       const el = this.doc.querySelector<HTMLElement>(selector);
       if (el && isShown(el)) return el;
     }
     return null;
   }
 
-  findOrb(container: HTMLElement | null = this.findVoiceContainer()): HTMLElement | null {
-    if (!container) return null;
+  findOrb(): HTMLElement | null {
     for (const selector of CHATGPT_SELECTORS.orb) {
-      const el = container.querySelector<HTMLElement>(selector);
-      if (el) return el;
+      const el = this.doc.querySelector<HTMLElement>(selector);
+      // `aria-hidden` is NOT a hidden test here: production marks the orb aria-hidden="true" (it is decorative,
+      // its button carries the label). Only the `hidden` attribute means it is not rendered.
+      if (el && !el.hidden) return el;
+    }
+    return null;
+  }
+
+  private findSessionControl(): HTMLElement | null {
+    for (const selector of CHATGPT_SELECTORS.sessionControl) {
+      const el = this.doc.querySelector<HTMLElement>(selector);
+      if (el && isShown(el)) return el;
     }
     return null;
   }
 
   snapshot(): VoiceUiSnapshot {
-    const container = this.findVoiceContainer();
-    return { active: container !== null, container, orb: this.findOrb(container) };
+    const orb = this.findOrb();
+    const container = this.findVoiceContainer(orb);
+    return { active: orb !== null || container !== null, container, orb };
   }
 
   observe(listener: (ui: VoiceUiSnapshot) => void): () => void {
@@ -111,6 +149,7 @@ export class ChatGPTAdapter implements ConversationUiAdapter {
   }
 }
 
+/** For containers only: a voice container marked aria-hidden is not the live one. */
 function isShown(el: HTMLElement): boolean {
   return !el.hidden && el.getAttribute('aria-hidden') !== 'true';
 }

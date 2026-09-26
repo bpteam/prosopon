@@ -39,7 +39,7 @@ test('enable shows the avatar; voice UI appearing/disappearing moves it and hide
   await expect(host).toHaveAttribute('data-voice-ui', 'true');
   await expect(host).toHaveAttribute('data-placement', 'anchor');
   await expect(host).toHaveAttribute('data-avatar-state', 'listening');
-  const orb = chatgpt.locator('[data-testid="voice-orb"]');
+  const orb = chatgpt.locator('[data-realtime-voice-orb]');
   await expect(orb).toHaveCSS('visibility', 'hidden');
   await expect(orb).toBeAttached(); // hidden, never removed
 
@@ -125,6 +125,31 @@ test('real tab audio: captured → offscreen analyser → LipSyncFrame → conte
   await expect.poll(async () => Number(await host.getAttribute('data-mouth'))).toBeLessThan(0.02);
 });
 
+// Regression (US-005): the amplitude fallback has to carry the mouth when the viseme analyser is gone. Verified
+// against real ChatGPT speech through the same 'prosopon:debug' hook this test uses.
+test('viseme analyser failure falls back to amplitude without stopping lip sync', async ({
+  serviceWorker,
+  chatgpt,
+}) => {
+  const tabId = await tabIdOf(serviceWorker, chatgpt);
+  await toggle(serviceWorker, tabId);
+  const host = root(chatgpt);
+  await expect(host).toHaveAttribute('data-avatar-loaded', 'true', { timeout: 30_000 });
+  await chatgpt.evaluate(() => (window as any).fixture.playSpeech());
+  await expect.poll(async () => Number(await host.getAttribute('data-mouth-peak'))).toBeGreaterThan(0.2);
+
+  await chatgpt.evaluate(() =>
+    document.dispatchEvent(new CustomEvent('prosopon:debug', { detail: { analyzer: 'none' } })),
+  );
+  await expect(host).toHaveAttribute('data-lip-sync-mode', 'amplitude');
+  const frames = Number(await host.getAttribute('data-frames'));
+  await expect.poll(async () => Number(await host.getAttribute('data-frames'))).toBeGreaterThan(frames + 10);
+  await expect.poll(async () => Number(await host.getAttribute('data-mouth'))).toBeGreaterThan(0.05);
+
+  await chatgpt.evaluate(() => (window as any).fixture.stopSpeech());
+  await expect.poll(async () => Number(await host.getAttribute('data-mouth'))).toBeLessThan(0.02);
+});
+
 test('page refresh keeps the tab enabled with a single overlay', async ({ serviceWorker, chatgpt }) => {
   const tabId = await tabIdOf(serviceWorker, chatgpt);
   await toggle(serviceWorker, tabId);
@@ -148,13 +173,13 @@ test('disable stops the capture, removes the overlay, restores the orb; repeated
   await chatgpt.evaluate(() => (window as any).fixture.openVoice());
   await toggle(serviceWorker, tabId);
   await expect(root(chatgpt)).toHaveAttribute('data-avatar-loaded', 'true', { timeout: 30_000 });
-  await expect(chatgpt.locator('[data-testid="voice-orb"]')).toHaveCSS('visibility', 'hidden');
+  await expect(chatgpt.locator('[data-realtime-voice-orb]')).toHaveCSS('visibility', 'hidden');
   expect(await hasOffscreen(serviceWorker)).toBe(true);
 
   await toggle(serviceWorker, tabId);
   expect((await tabState(serviceWorker, tabId)).state).toBe('disabled');
   await expect(root(chatgpt)).toHaveCount(0);
-  await expect(chatgpt.locator('[data-testid="voice-orb"]')).toHaveCSS('visibility', 'visible');
+  await expect(chatgpt.locator('[data-realtime-voice-orb]')).toHaveCSS('visibility', 'visible');
   await expect(chatgpt.locator('[data-prosopon-hidden]')).toHaveCount(0);
   // Offscreen document closed = its capture, AudioContext and analysers are gone.
   await expect.poll(() => hasOffscreen(serviceWorker)).toBe(false);

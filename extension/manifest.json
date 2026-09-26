@@ -4,8 +4,14 @@
   "version": "0.1.0",
   "description": "VRM avatar with real-time lip sync in place of the ChatGPT voice orb.",
   "minimum_chrome_version": "116",
-  "permissions": ["tabCapture", "offscreen"],
-  "host_permissions": ["https://chatgpt.com/*"],
+  "permissions": [
+    "tabCapture",
+    "offscreen",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://chatgpt.com/*"
+  ],
   "background": {
     "service_worker": "background.js",
     "type": "module"
@@ -15,15 +21,25 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://chatgpt.com/*"],
-      "js": ["content.js"],
+      "matches": [
+        "https://chatgpt.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_idle"
     }
   ],
   "web_accessible_resources": [
     {
-      "resources": ["avatar-runtime.js", "chunks/*", "models/*"],
-      "matches": ["https://chatgpt.com/*"]
+      "resources": [
+        "avatar-runtime.js",
+        "chunks/*",
+        "models/*"
+      ],
+      "matches": [
+        "https://chatgpt.com/*"
+      ]
     }
   ]
 }

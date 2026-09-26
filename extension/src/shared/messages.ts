@@ -39,7 +39,12 @@ export type ExtensionPayload =
   /** Offscreen → content over LIPSYNC_PORT. */
   | { type: 'audio:status'; status: AudioStatus }
   /** Content → SW: a failure that doesn't stop the capture (the VRM failed to load, etc.). */
-  | { type: 'extension:error'; error: string };
+  | { type: 'extension:error'; error: string }
+  /**
+   * Content → offscreen over LIPSYNC_PORT, development builds only: switch the viseme analyser, or drop it with
+   * 'none' to exercise the amplitude fallback against real audio. Ignored by production builds.
+   */
+  | { type: 'debug:analyzer'; choice: 'headaudio' | 'wlipsync' | 'none' };
 
 export type ExtensionMessage = ExtensionPayload & { v: typeof PROTOCOL_VERSION };
 export type MessageType = ExtensionMessage['type'];
@@ -71,6 +76,7 @@ const VALIDATORS: Record<MessageType, Validator> = {
     return !!s && typeof s === 'object' && (s.mode === 'amplitude' || s.mode === 'viseme') && typeof s.analyzer === 'string';
   },
   'extension:error': (m) => typeof m.error === 'string',
+  'debug:analyzer': (m) => m.choice === 'headaudio' || m.choice === 'wlipsync' || m.choice === 'none',
 };
 
 /**

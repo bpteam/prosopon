@@ -47,3 +47,15 @@ describe('message protocol', () => {
     for (const payload of bad) expect(parseMessage({ ...(payload as object), v: PROTOCOL_VERSION }), JSON.stringify(payload)).toBeNull();
   });
 });
+
+// Regression (US-005): the development analyser hook is part of the protocol, so a content script and an
+// offscreen document of different builds can't half-understand it.
+describe('debug:analyzer', () => {
+  it('accepts the three analyser choices and rejects anything else', () => {
+    for (const choice of ['headaudio', 'wlipsync', 'none'] as const) {
+      expect(parseMessage(message({ type: 'debug:analyzer', choice }))?.type).toBe('debug:analyzer');
+    }
+    expect(parseMessage({ v: PROTOCOL_VERSION, type: 'debug:analyzer', choice: 'nope' })).toBeNull();
+    expect(parseMessage({ v: PROTOCOL_VERSION, type: 'debug:analyzer' })).toBeNull();
+  });
+});

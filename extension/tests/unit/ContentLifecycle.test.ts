@@ -120,4 +120,23 @@ describe('ContentLifecycle', () => {
     await lifecycle.apply('enabled'); // late message: ignored
     expect(runtimes).toHaveLength(1);
   });
+
+  // Regression (US-005): the development analyser hook must not outlive the port it writes to.
+  it('sends debug payloads over the open port only', async () => {
+    const sent: unknown[] = [];
+    const { lifecycle } = setup({
+      connect: () => ({ disconnect: () => {}, send: (payload) => void sent.push(payload) }),
+    });
+
+    lifecycle.send({ type: 'debug:analyzer', choice: 'none' });
+    expect(sent).toEqual([]); // not connected yet
+
+    await lifecycle.apply('enabled');
+    lifecycle.send({ type: 'debug:analyzer', choice: 'none' });
+    expect(sent).toEqual([{ type: 'debug:analyzer', choice: 'none' }]);
+
+    await lifecycle.apply('disabled');
+    lifecycle.send({ type: 'debug:analyzer', choice: 'headaudio' });
+    expect(sent).toHaveLength(1);
+  });
 });

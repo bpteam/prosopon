@@ -7,10 +7,10 @@
       body { margin: 0; font: 14px system-ui, sans-serif; background: #fff; }
       #app { min-height: 100vh; display: flex; flex-direction: column; }
       #thread { flex: 1; padding: 16px; }
-      [data-testid='voice-mode-container'] {
+      [data-thread-focus-mode] {
         position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: #fafafa;
       }
-      [data-testid='voice-orb'] { width: 180px; height: 180px; border-radius: 50%; background: #4a8cff; }
+      [data-realtime-voice-orb] { width: 180px; height: 180px; border-radius: 50%; background: #4a8cff; }
       #close-voice { position: absolute; bottom: 32px; }
       /* Hostile page styles: must not reach the overlay. */
       div { box-sizing: content-box; }
@@ -27,21 +27,31 @@
       const app = document.getElementById('app');
       let speech = null;
       window.fixture = {
+        // Mirrors production chatgpt.com (2026-09-26): a decorative aria-hidden orb inside its button, inside
+        // the focus-mode container, plus the End Voice control. React unmounts all of it when voice ends.
         openVoice() {
-          if (document.querySelector('[data-testid="voice-mode-container"]')) return;
+          if (document.querySelector('[data-thread-focus-mode]')) return;
           const container = document.createElement('div');
-          container.dataset.testid = 'voice-mode-container';
+          container.dataset.threadFocusMode = 'true';
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.setAttribute('aria-label', 'Exit voice focus mode');
+          button.setAttribute('aria-pressed', 'true');
           const orb = document.createElement('div');
-          orb.dataset.testid = 'voice-orb';
+          orb.dataset.realtimeVoiceOrb = 'true';
+          orb.dataset.testid = 'avatar-overlay-voice-orb';
+          orb.setAttribute('aria-hidden', 'true');
+          button.append(orb);
           const close = document.createElement('button');
           close.id = 'close-voice';
+          close.setAttribute('aria-label', 'End Voice');
           close.textContent = 'End';
           close.onclick = () => window.fixture.closeVoice();
-          container.append(orb, close);
+          container.append(button, close);
           app.append(container);
         },
         closeVoice() {
-          document.querySelector('[data-testid="voice-mode-container"]')?.remove();
+          document.querySelector('[data-thread-focus-mode]')?.remove();
         },
         /** React-like churn: many unrelated mutations. */
         churn(n) {

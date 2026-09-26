@@ -113,6 +113,24 @@ async function toggle(tab: chrome.tabs.Tab): Promise<void> {
 
 chrome.action.onClicked.addListener((tab) => void toggle(tab));
 
+/**
+ * After an install or an update, chatgpt.com tabs that are already open hold no content script (the old one, if
+ * any, was orphaned by the reload): Chrome only injects into tabs loaded afterwards. Inject into them once, so
+ * the extension works without the user reloading every tab.
+ */
+chrome.runtime.onInstalled.addListener(() => {
+  void (async () => {
+    const tabs = await chrome.tabs.query({ url: 'https://chatgpt.com/*' });
+    for (const tab of tabs) {
+      if (tab.id === undefined) continue;
+      // Re-injecting into a tab that already has a live script is harmless: content.ts takes the old one over.
+      await chrome.scripting
+        .executeScript({ target: { tabId: tab.id }, files: ['content.js'] })
+        .catch(() => {}); // a discarded or restricted tab: it will inject itself when it loads
+    }
+  })();
+});
+
 chrome.runtime.onMessage.addListener((raw, sender, sendResponse) => {
   const msg = parseMessage(raw);
   if (!msg) return;
