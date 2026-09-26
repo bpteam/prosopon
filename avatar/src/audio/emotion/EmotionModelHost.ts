@@ -44,6 +44,7 @@ export class EmotionModelHost {
   private busy = false;
   private failures = 0;
   private inferences = 0;
+  private lastInferenceMsValue: number | null = null;
   private disposed = false;
   private readonly windowSamples: number;
   private readonly maxFailures: number;
@@ -73,6 +74,11 @@ export class EmotionModelHost {
 
   get inferenceCount(): number {
     return this.inferences;
+  }
+
+  /** Wall time of the last successful inference, ms (null before the first). Diagnostics only. */
+  get lastInferenceMs(): number | null {
+    return this.lastInferenceMsValue;
   }
 
   /** Mode every attached analyser reports right now. */
@@ -184,7 +190,9 @@ export class EmotionModelHost {
     window.set(ch.ring.subarray(ch.pos), 0);
     window.set(ch.ring.subarray(0, ch.pos), ch.ring.length - ch.pos);
     try {
+      const started = performance.now();
       const estimate = await withTimeout(model.infer(window), this.inferTimeoutMs, 'inference timed out');
+      this.lastInferenceMsValue = performance.now() - started;
       this.failures = 0;
       this.inferences++;
       if (this.channels.get(id) === ch) ch.analyzer.setModelEstimate(estimate);

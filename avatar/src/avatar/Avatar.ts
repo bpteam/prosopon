@@ -172,6 +172,7 @@ export class Avatar {
   private readonly drivenByName = new Map<HumanBoneName, DrivenBone>();
   private readonly procedural: ProceduralPose = { ...EMPTY_PROCEDURAL_POSE };
   private readonly hasShoulders: boolean;
+  private readonly restPose: Partial<Record<HumanBoneName, BoneRotation>>;
 
   private readonly gazeTarget = new THREE.Object3D();
   private gazeAnchor: THREE.Object3D | null = null;
@@ -207,7 +208,8 @@ export class Avatar {
     // Bones driven by procedural animation are always registered (missing ones are skipped).
     for (const bone of PROCEDURAL_BONES) this.ensureDriven(bone);
     this.hasShoulders = this.drivenByName.has('leftShoulder') && this.drivenByName.has('rightShoulder');
-    for (const [bone, rotation] of Object.entries(options.restPose ?? {})) {
+    this.restPose = { ...(options.restPose ?? {}) };
+    for (const [bone, rotation] of Object.entries(this.restPose)) {
       if (rotation) this.setBoneRotation(bone as HumanBoneName, rotation);
     }
   }
@@ -287,6 +289,17 @@ export class Avatar {
     return true;
   }
 
+  /**
+   * Manual bone rotations back to the rest pose given at construction (REST_POSE: arms down), every other driven
+   * bone to identity. Manual expressions are left alone (resetExpressions()).
+   */
+  resetPose(): void {
+    for (const bone of this.drivenBones) {
+      const rest = this.restPose[bone.name];
+      bone.manual.set(rest?.x ?? 0, rest?.y ?? 0, rest?.z ?? 0);
+    }
+  }
+
   getBoneRotation(name: HumanBoneName): BoneRotation | null {
     const driven = this.drivenByName.get(name);
     if (!driven) return null;
@@ -315,10 +328,15 @@ export class Avatar {
 
   /** World position of the head bone (raw skeleton). */
   getHeadWorldPosition(target: THREE.Vector3): THREE.Vector3 | null {
-    const head = this.vrm.humanoid.getRawBoneNode('head');
-    if (!head) return null;
-    head.updateWorldMatrix(true, false);
-    return target.setFromMatrixPosition(head.matrixWorld);
+    return this.getBoneWorldPosition('head', target);
+  }
+
+  /** World position of a humanoid bone (raw skeleton); null when the model lacks it. */
+  getBoneWorldPosition(name: HumanBoneName, target: THREE.Vector3): THREE.Vector3 | null {
+    const bone = this.vrm.humanoid.getRawBoneNode(name);
+    if (!bone) return null;
+    bone.updateWorldMatrix(true, false);
+    return target.setFromMatrixPosition(bone.matrixWorld);
   }
 
   // --- Procedural layer & gaze -------------------------------------------

@@ -15,6 +15,22 @@ describe('message protocol', () => {
     { type: 'lipsync:frame', frame },
     { type: 'audio:status', status: { mode: 'viseme', analyzer: 'ready' } },
     { type: 'extension:error', error: 'VRM failed' },
+    { type: 'dev:subscribe', enabled: true },
+    {
+      type: 'dev:telemetry',
+      telemetry: {
+        contexts: [{ id: 'assistant', state: 'running', sampleRate: 48000, baseLatencyMs: 5.3, outputLatencyMs: null }],
+        emotionInferenceMs: 18.2,
+        emotionBackend: 'ml-webgpu',
+        analyzer: 'ready',
+        assistantRmsDb: -32,
+        featureWorklet: true,
+        micWorklet: false,
+      },
+    },
+    { type: 'ui:placement', active: true },
+    { type: 'mic:preference' },
+    { type: 'mic:set-preference', enabled: false },
   ];
 
   it.each(valid.map((p) => [p.type, p] as const))('accepts %s (also after structured cloning)', (_type, payload) => {
@@ -43,6 +59,11 @@ describe('message protocol', () => {
       { type: 'lipsync:frame', frame: { ...frame, visemes: { aa: 1 } } },
       { type: 'audio:status', status: { mode: 'phoneme', analyzer: 'ready' } },
       { type: 'extension:error' },
+      { type: 'dev:subscribe', enabled: 'yes' },
+      { type: 'dev:telemetry', telemetry: { contexts: 'none' } },
+      { type: 'dev:telemetry', telemetry: { contexts: [{ id: 'page', state: 'running', sampleRate: 1, baseLatencyMs: null, outputLatencyMs: null }], emotionInferenceMs: null, emotionBackend: 'heuristic', analyzer: '', assistantRmsDb: null, featureWorklet: false, micWorklet: false } },
+      { type: 'ui:placement' },
+      { type: 'mic:set-preference', enabled: 1 },
     ];
     for (const payload of bad) expect(parseMessage({ ...(payload as object), v: PROTOCOL_VERSION }), JSON.stringify(payload)).toBeNull();
   });

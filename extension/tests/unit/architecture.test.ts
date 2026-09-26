@@ -272,3 +272,55 @@ describe('behaviour ownership', () => {
     for (const w of writes) expect(w).toMatch(/^(mouth(\.(aa|ih|ou|ee|oh))?|o\.\w+ = .*|0)$/);
   });
 });
+
+// --- In-page UI: Developer Mode, placement, popup ---------------------------------------------------------------------
+
+describe('in-page UI and popup', () => {
+  const uiFiles = readdirSync(resolve(EXT, 'src/ui'), { recursive: true })
+    .map(String)
+    .filter((f) => f.endsWith('.ts'))
+    .map((f) => resolve(EXT, 'src/ui', f));
+  const entries = [...uiFiles, resolve(EXT, 'src/popup/popup.ts')];
+
+  it('is a presentation layer: no three.js, VRM, Avatar, AvatarController, BehaviorMixer or AvatarStage at runtime', () => {
+    expect(uiFiles.length).toBeGreaterThan(5);
+    for (const entry of entries) {
+      const { files, packages } = graph(entry);
+      expect([...packages].filter(isThree), entry).toEqual([]);
+      expect(rel(files).filter((f) => /avatar\/src\/(avatar\/(Avatar|AvatarController|BehaviorMixer|AvatarLoader)\.ts|renderer\/(AvatarStage|RenderLoop)\.ts)/.test(f)), entry).toEqual([]);
+    }
+  });
+
+  it('never writes bones, expressions, the procedural layer or the conversation state directly', () => {
+    for (const f of entries) {
+      expect(code(f), f).not.toMatch(/setProcedural\(|expressionManager|getNormalizedBoneNode|getRawBoneNode|\.quaternion|\.rotation\.|setState\(|requestAnimationFrame|setInterval/);
+    }
+  });
+
+  it('ManualControls is the only writer of the manual (debug) layer in the extension', () => {
+    const all = readdirSync(resolve(EXT, 'src'), { recursive: true })
+      .map(String)
+      .filter((f) => f.endsWith('.ts'))
+      .map((f) => resolve(EXT, 'src', f));
+    const writers = all.filter((f) => /\.(setExpression|setBoneRotation|setHeadRotation|resetPose)\(/.test(code(f)));
+    expect(rel(new Set(writers))).toEqual(['extension/src/ui/dev/ManualControls.ts']);
+  });
+
+  it('knows nothing about ChatGPT’s DOM', () => {
+    for (const f of entries) expect(code(f), f).not.toMatch(/querySelector|data-testid="|getElementsBy|closest\(/);
+  });
+
+  it('Developer Tools are a lazily imported chunk: the runtime never imports them statically', () => {
+    const runtime = readFileSync(resolve(EXT, 'src/content/avatar-runtime.ts'), 'utf8');
+    expect(runtime).toMatch(/import\('\.\.\/ui\/dev\/DevTools'\)/);
+    expect(runtime).not.toMatch(/^import [^;]*from '\.\.\/ui\/dev\/DevTools'/m);
+    // The type-only bridge is fine; panels, charts and history are not reachable without the dynamic import.
+    const staticGraph = [...readFileSync(resolve(EXT, 'src/content/avatar-runtime.ts'), 'utf8').matchAll(/^import (?!type)[^;]*from '([^']+)'/gm)].map((m) => m[1]);
+    expect(staticGraph.filter((s) => /ui\/dev\/(DevTools|panels|History|widgets|avatarControls)/.test(s!))).toEqual([]);
+  });
+
+  it('the content loader stays free of the UI kit (tokens, windows, charts)', () => {
+    const { files } = graph(resolve(EXT, 'src/content/content.ts'));
+    expect(rel(files).filter((f) => f.includes('/src/ui/') || f.includes('shared/settings'))).toEqual([]);
+  });
+});

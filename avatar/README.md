@@ -46,12 +46,14 @@ WATCH_POLLING=true docker compose up               # when edits don't trigger HM
 ```text
 src/
 ├── main.ts                     sandbox composition root, the single rAF loop, HMR boundary, __AVATAR_DEBUG__
-├── config.ts                   camera framing (AVATAR_VIEW), REST_POSE, model URL
+├── config.ts                   camera defaults (AVATAR_VIEW), REST_POSE, model URL
 ├── renderer/
-│   ├── AvatarStage.ts          scene / camera / renderer / lights / resize / framing
+│   ├── AvatarStage.ts          scene / camera / renderer / lights / resize / camera API / helpers / render stats
+│   ├── CameraFraming.ts        pure: presets, AvatarBounds, CameraAdjust, Presentation → Framing
 │   └── RenderLoop.ts           the only requestAnimationFrame, clamped delta
 ├── avatar/
-│   ├── AvatarController.ts     public API: conversation state, sources, manual proxies, update()
+│   ├── AvatarController.ts     public API: conversation state, sources, manual proxies, snapshot, update()
+│   ├── BehaviorSnapshot.ts     read-only BehaviorDebugSnapshot (what the mixer composed last frame)
 │   ├── ConversationStateMachine.ts  idle/listening/thinking/speaking + delta-time profile blending
 │   ├── AvatarStateProfiles.ts  per-state profiles (multipliers, offsets, emotion weights), transition duration
 │   ├── BehaviorMixer.ts        idle × state + mouth + reaction + emotion + gesture → one ProceduralPose
@@ -102,6 +104,8 @@ controller.setReactionSource(reactions);             // ReactionSource
 controller.setEmotionSource(emotionChannels);        // EmotionSource
 controller.setGestureSource(gestures);               // GestureSource
 controller.update(delta);                            // once per frame, from the render loop
+controller.getBehaviorSnapshot();                    // read-only BehaviorDebugSnapshot (copies; for diagnostics)
+controller.resetPose();                              // manual bones back to REST_POSE
 ```
 
 - The controller runs (state machine, idle, sources) without an avatar; manual-layer calls return `false`/`0` until
@@ -127,8 +131,33 @@ Who sets the state is the integration's job: in the extension it is `Conversatio
 - Blink combines with the manual value as `max(manual, procedural)`.
 - `vrm.lookAt.target` is a proxy placed at the camera plus the idle gaze offset (camera right/up plane). three-vrm
   computes eye yaw/pitch relative to the current head, so the eyes stay on the camera while the head moves.
-- Framing: the camera is derived from the head bone, fitted so `frameWidth × frameHeight` metres around the target
-  stay visible at any aspect ratio. `REST_POSE` in `config.ts` lowers the T-pose arms for the portrait view.
+- `REST_POSE` in `config.ts` lowers the T-pose arms; framing is described under [Camera](#camera).
+
+## Camera
+
+One camera, one scene. `AvatarStage` owns the camera; nothing outside writes its fields.
+
+```ts
+stage.setCameraPreset('face' | 'waist' | 'full-body');
+stage.setCameraAdjust({ distanceOffset, targetYOffset, yaw, pitch }); // partial, clamped to CAMERA_ADJUST_LIMITS
+stage.resetCamera();                                                   // adjust → 0, preset kept
+stage.setPresentation({ x, y, height });  // normalized box centre (0..1) and height (fraction of viewport height)
+stage.framing;                            // last Framing {target, position, distance, offsetX, offsetY, box}
+stage.onFraming((f) => …);                // after every re-frame; returns unsubscribe
+stage.setBackground(null | color); stage.setSceneHelpers({ grid, skeleton, axes }); stage.renderStats;
+```
+
+- **Presets** come from `measureBounds(avatar)` (`AvatarBounds`: bounding-box top/bottom, neck, hips, feet in
+  world space; `resolveBounds` fills missing bones from `NOMINAL_BOUNDS`). A preset is a vertical span and a fill:
+  Face = top → just below the neck (0.85), Waist = top → hips (0.88), Full body = top → feet (0.9, ~5 % margins).
+  `computeFraming` is pure and height-driven: `distance = span / (fill × boxHeight × 2 tan(fov/2)) × (1 +
+  distanceOffset)`, orbiting the span's centre by yaw/pitch.
+- **Presentation** places that box in the viewport by a lens shift, `camera.setViewOffset`, so the canvas can cover
+  the whole viewport (the extension does) and the avatar is still drawn at `(x, y)` with `height`. Moving or
+  scaling the avatar never changes the preset; changing the preset never moves the box.
+- Resolution is capped by `AVATAR_VIEW.maxPixels` (4.5 M, `budgetPixelRatio`), so a full-viewport canvas on a 4K
+  screen doesn't render 8 M pixels of mostly transparency.
+- Sandbox: lil-gui *Camera* folder (preset, sliders, reset). Default preset: `AVATAR_VIEW.preset` (`waist`).
 
 ## Lip sync
 
@@ -275,7 +304,8 @@ HMR: `main.ts` self-accepts and disposes the loop, renderer, GUI and overlay. Th
 
 ## Tests
 
-- Unit (`tests/unit/`): framing, loader/avatar layering (`fakeVrm.ts`), controller and state machine, idle timing at
+- Unit (`tests/unit/`): camera presets (fill, centring, ordering, lens shift, clamping, degenerate bounds, pixel
+  budget), loader/avatar layering (`fakeVrm.ts`), controller and state machine, idle timing at
   30/60/120 FPS, amplitude and viseme lip sync, `AudioInput`, `LipSyncFrame`, user voice (VAD, pitch, baseline on
   synthetic signals), reactions, emotion analyser and mixer, `OnnxEmotionModel` (with an injected runtime), gestures.
 - Architecture (`tests/unit/architecture.test.ts`): gesture code imports no renderer types; only `Avatar`,

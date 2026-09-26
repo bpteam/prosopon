@@ -23,6 +23,7 @@ import { mathRandom, seededRandom, type GestureFrame, type GestureType } from '.
 import { GestureDebugPanel } from './debug/GestureDebugPanel';
 import featureWorkletUrl from './audio/user/UserVoiceWorklet.ts?worker&url';
 import { AvatarStage } from './renderer/AvatarStage';
+import { CAMERA_ADJUST_LIMITS, CAMERA_PRESETS, type CameraPreset } from './renderer/CameraFraming';
 import { RenderLoop } from './renderer/RenderLoop';
 
 export interface AvatarDebugApi {
@@ -31,6 +32,7 @@ export interface AvatarDebugApi {
   fps: number;
   avatar: Avatar | null;
   idle: AvatarIdleController;
+  /** Camera API: stage.setCameraPreset('face' | 'waist' | 'full-body'), setCameraAdjust, setPresentation. */
   stage: AvatarStage;
   controller: AvatarController;
   audio: AudioInput;
@@ -181,6 +183,7 @@ async function boot(): Promise<void> {
     emotionPanel = new EmotionDebugPanel(panel.gui, audio, controller, emotion, featureWorkletUrl);
     debugApi.emotionPanel = emotionPanel;
     gesturePanel = new GestureDebugPanel(panel.gui, gestures);
+    buildCameraFolder(panel.gui);
 
     overlay.setInfo({ loaded: true, vrmVersion: formatVrmVersion(avatar.vrmVersion) });
     debugApi.loaded = true;
@@ -189,6 +192,32 @@ async function boot(): Promise<void> {
   } catch (error) {
     reportError(error);
   }
+}
+
+/** Camera presets and manual corrections (AvatarStage camera API). */
+function buildCameraFolder(gui: AvatarDebugPanel['gui']): void {
+  const folder = gui.addFolder('Camera');
+  const view = { preset: stage.cameraPreset, ...stage.cameraAdjust };
+  const controls = [
+    folder.add(view, 'preset', [...CAMERA_PRESETS]).onChange((p: CameraPreset) => stage.setCameraPreset(p)),
+  ];
+  for (const key of Object.keys(CAMERA_ADJUST_LIMITS) as (keyof typeof CAMERA_ADJUST_LIMITS)[]) {
+    const [min, max] = CAMERA_ADJUST_LIMITS[key];
+    controls.push(folder.add(view, key, min, max, 0.01).onChange((v: number) => stage.setCameraAdjust({ [key]: v })));
+  }
+  folder
+    .add(
+      {
+        reset: () => {
+          stage.resetCamera();
+          Object.assign(view, stage.cameraAdjust);
+          for (const c of controls) c.updateDisplay();
+        },
+      },
+      'reset',
+    )
+    .name('reset camera');
+  folder.close();
 }
 
 function reportError(error: unknown): void {

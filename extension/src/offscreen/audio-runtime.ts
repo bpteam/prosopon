@@ -12,8 +12,10 @@ import {
   describeError,
   message,
   parseMessage,
+  type AudioContextTelemetry,
   type CaptureListReply,
   type CaptureReply,
+  type DevTelemetry,
   type EmotionStatus,
   type ExtensionPayload,
   type MicInfo,
@@ -79,6 +81,8 @@ class CaptureSession {
   private readonly lipSync = new VisemeLipSync(new AmplitudeLipSync(() => this.input.readRms()));
   private readonly host = new VisemeAnalyzerHost(this.input, this.lipSync, factories, AUDIO_RUNTIME_CONFIG.analyzer);
   private readonly ports = new Set<chrome.runtime.Port>();
+  /** Ports of tabs in Developer Mode: they also get dev:telemetry. */
+  private readonly telemetryPorts = new Set<chrome.runtime.Port>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private last = 0;
   private sinceStatus = Infinity;
@@ -155,7 +159,16 @@ class CaptureSession {
 
   addPort(port: chrome.runtime.Port): void {
     this.ports.add(port);
-    port.onDisconnect.addListener(() => this.ports.delete(port));
+    port.onDisconnect.addListener(() => {
+      this.ports.delete(port);
+      this.telemetryPorts.delete(port);
+    });
+    port.onMessage.addListener((raw) => {
+      const msg = parseMessage(raw);
+      if (msg?.type !== 'dev:subscribe') return;
+      if (msg.enabled) this.telemetryPorts.add(port);
+      else this.telemetryPorts.delete(port);
+    });
     if (import.meta.env.DEV) {
       // Development only: lets a test drive the analyser (including turning it off) on a live capture.
       port.onMessage.addListener((raw) => {
@@ -185,6 +198,7 @@ class CaptureSession {
     for (const track of this.stream.getTracks()) track.stop();
     for (const port of this.ports) port.disconnect();
     this.ports.clear();
+    this.telemetryPorts.clear();
   }
 
   private startTicking(): void {
@@ -206,10 +220,33 @@ class CaptureSession {
         this.sinceStatus = 0;
         this.broadcast({ type: 'audio:status', status: { mode: this.lipSync.mode, analyzer: this.host.status } });
         this.broadcast({ type: 'emotion:status', status: refreshEmotionStatus() });
+        if (this.telemetryPorts.size > 0) {
+          const telemetry = this.telemetry();
+          for (const port of this.telemetryPorts) this.send(port, { type: 'dev:telemetry', telemetry });
+        }
       }
     } catch (error) {
       this.onEnded(this, `audio runtime failed: ${describeError(error)}`);
     }
+  }
+
+  /** Developer Mode only (a subscribed port): audio context state and latency, analyser and model status. */
+  private telemetry(): DevTelemetry {
+    const contexts: AudioContextTelemetry[] = [];
+    const assistant = this.input.context;
+    if (assistant) contexts.push(contextTelemetry('assistant', assistant));
+    const mic = userVoice.context;
+    if (mic) contexts.push(contextTelemetry('mic', mic));
+    const rms = this.input.readRms();
+    return {
+      contexts,
+      emotionInferenceMs: emotionHost?.lastInferenceMs ?? null,
+      emotionBackend: emotionHost?.mode ?? emotionStatus.mode,
+      analyzer: this.host.status,
+      assistantRmsDb: rms > 0 ? 20 * Math.log10(rms) : null,
+      featureWorklet: this.detachFeatures !== null,
+      micWorklet: userVoice.running,
+    };
   }
 
   broadcast(payload: ExtensionPayload): void {
@@ -227,6 +264,11 @@ class CaptureSession {
 }
 
 const sessions = new Map<number, CaptureSession>();
+
+function contextTelemetry(id: AudioContextTelemetry['id'], ctx: AudioContext): AudioContextTelemetry {
+  const ms = (s: number | undefined) => (typeof s === 'number' && Number.isFinite(s) ? s * 1000 : null);
+  return { id, state: ctx.state, sampleRate: ctx.sampleRate, baseLatencyMs: ms(ctx.baseLatency), outputLatencyMs: ms(ctx.outputLatency) };
+}
 
 /** Optional local emotion model, shared by every channel; null = prosody rules only. */
 let emotionHost: EmotionModelHost | null = null;

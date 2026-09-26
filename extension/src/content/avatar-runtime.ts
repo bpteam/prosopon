@@ -17,7 +17,36 @@ import { SILENT_USER_VOICE_FRAME, type UserVoiceFrame } from '@avatar/audio/user
 import { MAX_FRAME_DELTA, REST_POSE } from '@avatar/config';
 import { AvatarStage } from '@avatar/renderer/AvatarStage';
 import { RenderLoop } from '@avatar/renderer/RenderLoop';
-import { describeError, type AudioStatus, type EmotionStatus, type ExtensionTabState, type MicStatus } from '../shared/messages';
+import { GESTURE_TYPES } from '@avatar/avatar/gesture/Gesture';
+import {
+  describeError,
+  type AudioStatus,
+  type DevTelemetry,
+  type EmotionStatus,
+  type ExtensionPayload,
+  type ExtensionTabState,
+  type MicStatus,
+} from '../shared/messages';
+import {
+  BASE_BOX_HEIGHT,
+  DEFAULT_DEV_WINDOWS,
+  DEFAULT_VIEW_SETTINGS,
+  PersistedValue,
+  STORAGE_KEYS,
+  chromeSettingsArea,
+  cloneView,
+  isCameraModified,
+  sanitizeDevWindows,
+  sanitizeDeveloperMode,
+  sanitizeViewSettings,
+  type AvatarViewSettingsV1,
+  type SettingsArea,
+} from '../shared/settings';
+import { UiLayer } from '../ui/shared/UiLayer';
+import { PLACEMENT_CSS, PlacementHandle } from '../ui/placement/PlacementHandle';
+import type { DevBridge, DevSample } from '../ui/dev/DevBridge';
+import { DevModeSwitch } from './DevModeSwitch';
+import { ManualControls } from '../ui/dev/ManualControls';
 import { AvatarOverlay } from './AvatarOverlay';
 import { ChatGPTAdapter, type ConversationUiAdapter, type VoiceUiSnapshot } from './ChatGPTAdapter';
 import { ConversationSignalResolver, type ConversationSignals } from './ConversationSignalResolver';
@@ -46,6 +75,10 @@ export interface AvatarRuntimeOptions {
   onError?: (error: string) => void;
   adapter?: ConversationUiAdapter;
   doc?: Document;
+  /** Persistent UI settings (chrome.storage.local by default). */
+  settingsArea?: SettingsArea;
+  /** Sends to the offscreen document over the frame port (dev:subscribe). No-op while disconnected. */
+  sendToOffscreen?: (payload: ExtensionPayload) => void;
 }
 
 export interface Diagnostics {
@@ -95,6 +128,8 @@ export interface ProsoponDebug {
   /** Mapping bounds of the emotion layer; mutable for calibration. */
   emotionConfig: EmotionMixConfig;
   gesture: GestureEngine;
+  /** Camera API (presets, corrections, presentation). */
+  stage: AvatarStage;
 }
 
 declare global {
@@ -112,6 +147,10 @@ export interface AvatarRuntimeHandle {
   setEmotionStatus(status: EmotionStatus): void;
   setOffscreenConnected(connected: boolean): void;
   setExtensionState(state: ExtensionTabState, error?: string): void;
+  /** "Move avatar" (popup, quick toolbar): drag the avatar's box into place. */
+  setPlacementMode(active: boolean): void;
+  /** Offscreen developer telemetry (only arrives while Developer Mode subscribed to it). */
+  pushTelemetry(telemetry: DevTelemetry): void;
   readonly diagnostics: Readonly<Diagnostics>;
   dispose(): void;
 }
@@ -134,8 +173,9 @@ const GESTURE_DEBUG_EVENT = 'prosopon:gesture';
 
 export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle {
   const doc = options.doc ?? document;
+  const view = doc.defaultView ?? window;
   const adapter = options.adapter ?? new ChatGPTAdapter(doc);
-  const overlay = new AvatarOverlay(doc, { debug: options.debug });
+  const overlay = new AvatarOverlay(doc);
   const stage = new AvatarStage(overlay.stageContainer);
 
   // The controller exists before the VRM: states from the resolver set while it loads are kept.
@@ -152,6 +192,8 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
   /** Seconds since the last user voice frame; the user is not speaking once frames stop. */
   let userFrameAge = Infinity;
   const USER_FRAME_STALE = 0.5;
+  /** performance.now() of the last LipSyncFrame (frame age in the Dev UI). */
+  let lastFrameAt = -Infinity;
 
   const diag: Diagnostics = {
     extensionState: 'enabled',
@@ -183,12 +225,11 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
     emotionFrames: { user: 0, assistant: 0 },
     emotionEnabled: { user: true, assistant: true },
   };
-  const toggles: Partial<Record<EmotionChannel, HTMLInputElement | null>> = {};
+  // Manual (debug) layer and the emotion switches; the only manual writer, used by Developer Mode.
+  const manual = new ManualControls(controller, (channel, enabled) => emotion.setEnabled(channel, enabled));
   const setEmotionEnabled = (channel: EmotionChannel, enabled: boolean) => {
-    emotion.setEnabled(channel, enabled);
+    manual.setEmotionEnabled(channel, enabled);
     diag.emotionEnabled[channel] = enabled;
-    const input = toggles[channel];
-    if (input && input.checked !== enabled) input.checked = enabled;
   };
   const onEmotionDebug = (event: Event) => {
     const d = (event as CustomEvent<{ channel?: unknown; enabled?: unknown }>).detail;
@@ -197,12 +238,6 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
     }
   };
   if (options.debug) {
-    toggles.user = overlay.addDebugToggle('prosopon-user-emotion', 'User emotion reactions', true, (on) =>
-      setEmotionEnabled('user', on),
-    );
-    toggles.assistant = overlay.addDebugToggle('prosopon-assistant-emotion', 'Assistant emotion expression', true, (on) =>
-      setEmotionEnabled('assistant', on),
-    );
     doc.addEventListener(EMOTION_DEBUG_EVENT, onEmotionDebug);
     doc.addEventListener(GESTURE_DEBUG_EVENT, onGestureDebug);
   }
@@ -250,6 +285,7 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
         return controller.emotionConfig;
       },
       gesture: gestures,
+      stage,
     };
   }
   let mouthPeak = 0;
@@ -262,12 +298,274 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
     restoreOrb = null;
     // Worst case (selectors outdated): no orb found, ChatGPT's orb stays visible next to the avatar.
     if (ui.orb) restoreOrb = adapter.hideVisually(ui.orb);
-    overlay.setAnchor(ui.orb ?? ui.container);
     resolver.setVoiceUiActive(ui.active);
     diag.voiceUi = ui.active;
     diag.orbHidden = restoreOrb !== null;
   };
   const stopObserving = adapter.observe(onVoiceUi);
+
+  // --- Layout: camera preset + corrections, placement, size (persisted in chrome.storage.local) ----------------
+
+  const area = options.settingsArea ?? chromeSettingsArea();
+  const viewSetting = new PersistedValue(area, STORAGE_KEYS.view, sanitizeViewSettings, cloneView(DEFAULT_VIEW_SETTINGS));
+  const devModeSetting = new PersistedValue(area, STORAGE_KEYS.developerMode, sanitizeDeveloperMode, false);
+  const windowsSetting = new PersistedValue(area, STORAGE_KEYS.devWindows, sanitizeDevWindows, sanitizeDevWindows(DEFAULT_DEV_WINDOWS));
+  const viewListeners = new Set<() => void>();
+
+  function applyView(v: Readonly<AvatarViewSettingsV1>): void {
+    const { preset, ...adjust } = v.camera;
+    stage.setCameraPreset(preset);
+    stage.setCameraAdjust(adjust);
+    stage.setPresentation({ x: v.placement.x, y: v.placement.y, height: v.placement.scale * BASE_BOX_HEIGHT });
+    const d = overlay.host.dataset;
+    d.cameraPreset = preset;
+    d.cameraModified = String(isCameraModified(v.camera));
+    d.placementX = v.placement.x.toFixed(3);
+    d.placementY = v.placement.y.toFixed(3);
+    d.avatarScale = v.placement.scale.toFixed(2);
+    for (const l of [...viewListeners]) l();
+  }
+  function updateView(
+    change: { camera?: Partial<AvatarViewSettingsV1['camera']>; placement?: Partial<AvatarViewSettingsV1['placement']> },
+    persist: 'debounced' | 'now' = 'debounced',
+  ): void {
+    const cur = viewSetting.value;
+    const next = sanitizeViewSettings({
+      version: 1,
+      camera: { ...cur.camera, ...change.camera },
+      placement: { ...cur.placement, ...change.placement },
+    });
+    viewSetting.set(next, persist);
+    applyView(next);
+  }
+  applyView(viewSetting.value);
+  const offView = viewSetting.onChange(applyView); // another tab or the popup
+
+  // --- In-page UI root (placement handle, developer windows): created on first use -----------------------------
+
+  let layer: UiLayer | null = null;
+  const ensureLayer = (): UiLayer => (layer ??= new UiLayer(doc));
+  const releaseLayer = () => {
+    if (layer && !placement && !devMode.on) {
+      layer.dispose();
+      layer = null;
+    }
+  };
+
+  let placement: { handle: PlacementHandle; stop: () => void } | null = null;
+  function setPlacementMode(active: boolean): void {
+    if (active === !!placement || disposed) return;
+    if (!active) {
+      placement!.stop();
+      placement = null;
+      void viewSetting.flush();
+      releaseLayer();
+      devMode.handle?.refresh();
+      return;
+    }
+    const l = ensureLayer();
+    l.addStyle('placement', PLACEMENT_CSS);
+    const handle = new PlacementHandle(doc, {
+      viewport: () => l.viewport,
+      onChange: (change, final) => updateView({ placement: change }, final ? 'now' : 'debounced'),
+      onDone: () => setPlacementMode(false),
+    });
+    l.root.append(handle.el);
+    if (stage.framing) handle.setBox(stage.framing.box);
+    const offFraming = stage.onFraming((f) => handle.setBox(f.box));
+    placement = {
+      handle,
+      stop: () => {
+        offFraming();
+        handle.dispose();
+      },
+    };
+    handle.el.focus({ preventScroll: true });
+    devMode.handle?.refresh();
+  }
+
+  // --- Developer Mode: diagnostics and controls, loaded only while on -----------------------------------------
+
+  let telemetry: DevTelemetry | null = null;
+  let telemetryWanted = false;
+  let transparent = true;
+
+  const sendTelemetryRequest = () => options.sendToOffscreen?.({ type: 'dev:subscribe', enabled: telemetryWanted });
+
+  const bridge: DevBridge = {
+    doc,
+    get layer() {
+      return ensureLayer();
+    },
+    sample: () => sampleDiagnostics(),
+    windows: {
+      get value() {
+        return windowsSetting.value;
+      },
+      set: (value, persist) => windowsSetting.set(value, persist),
+    },
+    view: {
+      get value() {
+        return viewSetting.value;
+      },
+      update: updateView,
+      resetCamera: () => updateView({ camera: { distanceOffset: 0, targetYOffset: 0, yaw: 0, pitch: 0 } }, 'now'),
+      onChange(listener) {
+        viewListeners.add(listener);
+        return () => void viewListeners.delete(listener);
+      },
+    },
+    setPlacementMode,
+    get placementMode() {
+      return !!placement;
+    },
+    setDeveloperMode: (enabled) => {
+      devModeSetting.set(enabled, 'now');
+      setDevMode(enabled);
+    },
+    camera: {
+      get preset() {
+        return stage.cameraPreset;
+      },
+      get adjust() {
+        return stage.cameraAdjust;
+      },
+    },
+    scene: {
+      helpers: () => stage.sceneHelpers,
+      setHelpers: (h) => stage.setSceneHelpers(h),
+      get transparent() {
+        return transparent;
+      },
+      setTransparent(on) {
+        transparent = on;
+        stage.setBackground(on ? null : '#080b0f');
+      },
+    },
+    avatar: {
+      listExpressions: () => controller.listExpressions(),
+      hasExpression: (name) => controller.hasExpression(name),
+      setExpressionPreview: (active) => manual.setExpressionPreview(active),
+      get expressionPreview() {
+        return manual.expressionPreview;
+      },
+      previewExpression: (name, value) => manual.previewExpression(name, value),
+      clearExpressions: () => manual.clearExpressions(),
+      setPoseOffsets: (o) => manual.setPoseOffsets(o),
+      get poseOffsets() {
+        return manual.poseOffsets;
+      },
+      resetPoseOffsets: () => manual.resetPoseOffsets(),
+    },
+    emotion: { setEnabled: setEmotionEnabled },
+    gestures: {
+      types: GESTURE_TYPES,
+      trigger: (type) => gestures.trigger(type),
+      cancel: () => gestures.cancel(),
+      setAuto: (on) => (gestures.auto = on),
+      setEnabled: (on) => (gestures.enabled = on),
+    },
+    setTelemetry(enabled) {
+      telemetryWanted = enabled;
+      if (!enabled) telemetry = null;
+      sendTelemetryRequest();
+    },
+  };
+
+  overlay.host.dataset.devMode = 'false';
+  const devMode = new DevModeSwitch(
+    // A separate chunk: none of the developer UI is parsed unless Developer Mode is on.
+    () => import('../ui/dev/DevTools').then((m) => () => m.mountDevTools(bridge)),
+    {
+      onEnable: () => (overlay.host.dataset.devMode = 'true'),
+      onDisable: () => {
+        // Leaving Developer Mode also ends a preview and the manual pose: the procedural layer owns the avatar again.
+        manual.release();
+        stage.setSceneHelpers({ grid: false, skeleton: false, axes: false });
+        bridge.scene.setTransparent(true);
+        if (telemetryWanted) bridge.setTelemetry(false);
+        overlay.host.dataset.devMode = 'false';
+        releaseLayer();
+      },
+      onError: (error) => console.warn('[prosopon] developer tools failed to load:', error),
+    },
+  );
+  const setDevMode = (on: boolean) => {
+    if (!disposed) devMode.set(on);
+  };
+  const offDevMode = devModeSetting.onChange(setDevMode);
+
+  function sampleDiagnostics(): DevSample {
+    const conv = resolver.diagnostics;
+    const followed = emotion.value;
+    const g = gestures.current;
+    const r = stage.renderStats;
+    const memory = (performance as Performance & { memory?: { usedJSHeapSize: number } }).memory;
+    const channel = (ch: EmotionChannel) => ({
+      ...diag.emotion[ch],
+      ...followed[ch],
+      mode: diag.emotion[ch].mode,
+      active: followed[ch].active,
+      enabled: diag.emotionEnabled[ch],
+    });
+    return {
+      time: performance.now(),
+      avatarLoaded: diag.avatarLoaded,
+      voiceUi: diag.voiceUi,
+      offscreenConnected: diag.offscreenConnected,
+      state: conv.resolved,
+      signals: {
+        voiceUi: conv.signals.voiceUiActive,
+        userSpeaking: conv.signals.userSpeaking,
+        assistantSpeaking: conv.signals.assistantSpeaking,
+        crosstalk: conv.crosstalk,
+      },
+      lipSync: {
+        mode: diag.lipSyncMode,
+        analyzer: diag.analyzer,
+        active: diag.audioActive,
+        volume: diag.volume,
+        visemes: { ...diag.visemes },
+        frameHz: diag.frameHz,
+        frameAgeMs: performance.now() - lastFrameAt,
+      },
+      mic: diag.mic,
+      userVoice: diag.userVoice,
+      emotion: { user: channel('user'), assistant: channel('assistant') },
+      emotionStatus: diag.emotionStatus,
+      behavior: controller.getBehaviorSnapshot(),
+      gesture: {
+        type: g.type,
+        phase: g.phase,
+        progress: g.progress,
+        intensity: g.intensity,
+        cooldown: gestures.cooldownRemaining,
+        count: gestures.history.gestureCount,
+        nods: gestures.nods,
+        auto: gestures.auto,
+        enabled: gestures.enabled,
+      },
+      render: {
+        fps: 0,
+        frameMs: 0,
+        drawCalls: r.drawCalls,
+        triangles: r.triangles,
+        pixelRatio: r.pixelRatio,
+        memoryMb: memory ? memory.usedJSHeapSize / 1048576 : null,
+      },
+      telemetry,
+    };
+  }
+
+  const onViewportResize = () => devMode.handle?.refresh();
+  view.addEventListener('resize', onViewportResize);
+
+  let disposed = false;
+  void Promise.all([viewSetting.load(), devModeSetting.load(), windowsSetting.load()]).then(() => {
+    if (disposed) return;
+    applyView(viewSetting.value);
+    setDevMode(devModeSetting.value);
+  });
 
   let sinceDebug = Infinity;
   const loop = new RenderLoop((delta) => {
@@ -278,9 +576,13 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
     reaction.setSuppressed(resolver.signals.assistantSpeaking);
     controller.update(delta);
     stage.render();
+    devMode.handle?.frame(delta);
     const m = mouth.value;
     const open = Math.max(m.aa, m.ih, m.ou, m.ee, m.oh);
     if (open > mouthPeak) mouthPeak = open;
+    // Wall clock, not the loop's clamped delta: at a low frame rate the clamped delta lags real time and the
+    // transport rate would read 0 for seconds.
+    if (performance.now() - rateMark.time >= 1000) measureFrameRate();
     sinceDebug += delta;
     if (sinceDebug >= 1 / DEBUG_RATE) {
       sinceDebug = 0;
@@ -290,7 +592,6 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
   loop.start();
 
   let vrm: Awaited<ReturnType<AvatarLoader['loadVRM']>> | null = null;
-  let disposed = false;
   void (async () => {
     try {
       const loaded = await new AvatarLoader().loadVRM(options.assetUrl(MODEL_PATH));
@@ -304,6 +605,7 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
       controller.update(0);
       stage.setAvatar(avatar);
       diag.avatarLoaded = true;
+      overlay.host.dataset.avatarLoaded = 'true';
     } catch (error) {
       if (disposed) return;
       diag.avatarLoaded = 'error';
@@ -313,15 +615,19 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
     }
   })();
 
-  function renderDiagnostics(open: number): void {
-    if (!options.debug) return;
+  /** Transport health for the diagnostics: LipSyncFrames received per second. */
+  function measureFrameRate(): void {
     const now = performance.now();
     if (rateMark.time > 0) {
       const seconds = (now - rateMark.time) / 1000;
       if (seconds > 0) diag.frameHz = (diag.frames - rateMark.frames) / seconds;
     }
     rateMark = { frames: diag.frames, time: now };
-    // Development builds only: attributes for E2E, text for humans. Nothing of this ships to end users.
+  }
+
+  function renderDiagnostics(open: number): void {
+    if (!options.debug) return;
+    // Development builds only: attributes for E2E. Nothing of this ships to end users.
     const d = overlay.host.dataset;
     d.extensionState = diag.extensionState;
     d.avatarLoaded = String(diag.avatarLoaded);
@@ -361,7 +667,6 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
     d.gestureCount = String(gestures.history.gestureCount);
     // Largest arm offset in the composed pose: "no large arm movement after an interruption".
     d.armOffset = maxArmOffset(controller.pose).toFixed(4);
-    const r = reaction.value;
     const mix = controller.emotionMix;
     const pose = controller.pose;
     const followed = emotion.value;
@@ -382,40 +687,6 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
     d.emotionMixAssistant = mix.assistant.toFixed(3);
     d.emotionMixUser = mix.user.toFixed(3);
     d.emotionExpressions = EMOTION_EXPRESSIONS.map((e) => `${e}:${pose[e].toFixed(3)}`).join(' ');
-    const emotionLines = (['user', 'assistant'] as const).map((ch) => {
-      const f = followed[ch];
-      const sign = (v: number) => (v >= 0 ? '+' : '') + v.toFixed(2);
-      return [
-        `${ch.padEnd(11)} ${diag.emotionEnabled[ch] ? 'ON ' : 'OFF'} · ${f.active ? 'active' : 'silent'} · ${diag.emotion[ch].mode} · ${diag.emotionFrames[ch]} frames`,
-        `            val ${sign(f.valence)} (c ${f.valenceConfidence.toFixed(2)}) · aro ${f.arousal.toFixed(2)} · en ${f.energy.toFixed(2)} · ten ${f.tension.toFixed(2)}`,
-        `            lift ${sign(f.pitchLift)} · var ${f.pitchVariation.toFixed(2)} · rate ${f.speechRate.toFixed(2)} · conf ${f.confidence.toFixed(2)}`,
-      ].join('\n');
-    });
-    overlay.setDebugText(
-      [
-        `extension   ${diag.extensionState}${diag.extensionError ? ` (${diag.extensionError})` : ''}`,
-        `tabCapture  ${diag.extensionState === 'enabled' ? 'capturing' : 'off'}`,
-        `offscreen   ${diag.offscreenConnected ? 'connected' : 'disconnected'} · ${diag.frames} frames · ${diag.frameHz.toFixed(0)} Hz`,
-        `audio       ${diag.audioActive ? 'active' : 'silent'} · mouth ${open.toFixed(2)}`,
-        `lip sync    ${diag.lipSyncMode} · ${diag.analyzer} · vol ${diag.volume.toFixed(2)}`,
-      `visemes     ${VISEMES.map((v) => `${v} ${diag.visemes[v].toFixed(2)}`).join('  ')}`,
-        `avatar      ${diag.avatarLoaded === true ? 'loaded' : diag.avatarLoaded === 'error' ? `error: ${diag.avatarError}` : 'loading'} · ${controller.getState()}`,
-        `voice UI    ${diag.voiceUi ? 'detected' : 'not found'}${diag.orbHidden ? ' · orb hidden' : ''}`,
-        '— User Voice',
-        `mic         ${diag.mic.state === 'off' ? 'Microphone reactions: OFF' : `Microphone reactions: ON · ${diag.mic.state}`}${diag.mic.error ? ` (${diag.mic.error})` : ''}`,
-        `speaking    ${u.speaking ? 'yes' : 'no'} · segment ${u.segmentDuration.toFixed(2)} s · ${diag.userFrames} frames`,
-        `level       ${u.rmsDb.toFixed(1)} dBFS · floor ${u.noiseFloorDb.toFixed(1)} · energy ${u.energy.toFixed(2)}`,
-        `pitch       ${u.pitchHz === null ? '—' : `${u.pitchHz.toFixed(0)} Hz`} · conf ${u.pitchConfidence.toFixed(2)} · rel ${u.relativePitch.toFixed(1)} st · var ${u.pitchVariation.toFixed(1)} st`,
-        `reaction    engagement ${r.engagement.toFixed(2)} · lift ${r.pitchLift.toFixed(2)} · utterances ${r.utteranceEnds}`,
-        `gesture     ${g.type ?? '—'}${g.active ? ` · ${g.phase} · ${g.intensity.toFixed(2)}` : ''} · ${gestures.history.gestureCount} total · nods ${gestures.nods} · cooldown ${gestures.cooldownRemaining.toFixed(1)} s`,
-        '— Conversation',
-        `signals     voice UI ${conv.signals.voiceUiActive ? 'on' : 'off'} · user ${conv.signals.userSpeaking ? 'speaking' : '—'} · assistant ${conv.signals.assistantSpeaking ? 'speaking' : '—'}`,
-        `resolved    ${conv.resolved}${conv.crosstalk ? ' · CROSSTALK' : ''} · crosstalk ${conv.crosstalkEvents} · ignored ${conv.suppressedInterruptions}`,
-        `— Emotion / Prosody · model ${diag.emotionStatus.model} · ${diag.emotionStatus.inferences} runs${diag.emotionStatus.error ? ` (${diag.emotionStatus.error})` : ''}`,
-        ...emotionLines,
-        `mix         assistant ${mix.assistant.toFixed(2)} · user ${mix.user.toFixed(2)} · ${EMOTION_EXPRESSIONS.map((e) => `${e.slice(0, 5)} ${pose[e].toFixed(2)}`).join(' ')}`,
-      ].join('\n'),
-    );
   }
 
   return {
@@ -424,6 +695,7 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
       diag.frames++;
       diag.visemes = frame.visemes;
       diag.volume = frame.volume;
+      lastFrameAt = performance.now();
       mouth.push(frame);
       if (frame.active !== diag.audioActive) {
         diag.audioActive = frame.active;
@@ -459,30 +731,54 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
     },
     setOffscreenConnected(connected) {
       diag.offscreenConnected = connected;
-      if (!connected) {
-        mouth.reset();
-        diag.audioActive = false;
-        resolver.setAssistantAudioActive(false);
-        diag.mic = { state: 'off' };
-        resetUserVoice();
-        emotion.reset('assistant');
-        diag.emotion.assistant = NEUTRAL_EMOTION;
+      if (connected) {
+        // A new port: repeat the telemetry subscription (the offscreen document forgot the old port).
+        if (telemetryWanted) sendTelemetryRequest();
+        return;
       }
+      telemetry = null;
+      mouth.reset();
+      diag.audioActive = false;
+      resolver.setAssistantAudioActive(false);
+      diag.mic = { state: 'off' };
+      resetUserVoice();
+      emotion.reset('assistant');
+      diag.emotion.assistant = NEUTRAL_EMOTION;
     },
     setExtensionState(state, error) {
       diag.extensionState = state;
       diag.extensionError = error ?? null;
+    },
+    setPlacementMode,
+    pushTelemetry(t) {
+      if (!telemetryWanted) return;
+      telemetry = t;
+      devMode.handle?.pushTelemetry(t);
     },
     dispose() {
       if (disposed) return;
       disposed = true;
       loop.stop();
       stopObserving();
+      view.removeEventListener('resize', onViewportResize);
       doc.removeEventListener(EMOTION_DEBUG_EVENT, onEmotionDebug);
       doc.removeEventListener(GESTURE_DEBUG_EVENT, onGestureDebug);
       if (window.__PROSOPON_DEBUG__?.diagnostics === diag) delete window.__PROSOPON_DEBUG__;
       restoreOrb?.();
       restoreOrb = null;
+      if (placement) {
+        placement.stop();
+        placement = null;
+      }
+      devMode.dispose();
+      layer?.dispose();
+      layer = null;
+      offView();
+      offDevMode();
+      viewListeners.clear();
+      viewSetting.dispose();
+      devModeSetting.dispose();
+      windowsSetting.dispose();
       controller.dispose();
       stage.dispose();
       if (vrm) disposeVRM(vrm);
