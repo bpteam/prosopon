@@ -124,6 +124,8 @@ export class ContentLifecycle {
       runtime.setEmotionStatus(msg.status);
     } else if (msg.type === 'dev:telemetry') {
       runtime.pushTelemetry(msg.telemetry);
+    } else if (msg.type === 'calibration:reply') {
+      runtime.pushCalibrationReply(msg.reply);
     }
   }
 

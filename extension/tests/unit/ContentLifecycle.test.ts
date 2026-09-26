@@ -18,6 +18,7 @@ function fakeRuntime(): AvatarRuntimeHandle & { frames: unknown[]; disposed: num
     setExtensionState: vi.fn(),
     setPlacementMode: vi.fn(),
     pushTelemetry: vi.fn(),
+    pushCalibrationReply: vi.fn(),
     dispose: () => void r.disposed++,
   };
   return r;

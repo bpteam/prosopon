@@ -351,3 +351,44 @@ describe('in-page UI and popup', () => {
     expect(rel(files).filter((f) => f.includes('/src/ui/') || f.includes('shared/settings'))).toEqual([]);
   });
 });
+
+// --- Calibration wizard (Developer Mode) ------------------------------------------------------------------------------
+
+describe('calibration wizard', () => {
+  const calDir = resolve(EXT, 'src/calibration');
+  const calFiles = readdirSync(calDir).filter((f) => f.endsWith('.ts')).map((f) => join(calDir, f));
+  const local = [...calFiles, resolve(EXT, 'src/offscreen/CalibrationRecorder.ts'), resolve(EXT, 'src/offscreen/CalibrationRecorderWorklet.ts'), resolve(EXT, 'src/calibration-export/export.ts'), resolve(EXT, 'src/ui/dev/calibrationPanel.ts')];
+
+  it('never touches the network: no fetch, XHR, WebSocket, beacon or downloads API', () => {
+    for (const f of local) expect(code(f), f).not.toMatch(/\bfetch\(|XMLHttpRequest|WebSocket|sendBeacon|EventSource|chrome\.downloads/);
+  });
+
+  it('drives ChatGPT only through the adapter: no DOM queries or selectors outside ChatGPTAdapter', () => {
+    for (const f of calFiles) expect(code(f), f).not.toMatch(/querySelector|data-testid|getElementsBy|closest\(|\bdocument\b|MutationObserver/);
+  });
+
+  it('the runner reaches no avatar runtime, renderer or three.js: it only sees CalibrationHost', () => {
+    const { files, packages } = graph(resolve(calDir, 'CalibrationRunner.ts'));
+    expect([...packages].filter(isThree)).toEqual([]);
+    const forbidden = /avatar\/src\/(avatar\/(Avatar|AvatarController|BehaviorMixer|AvatarLoader)\.ts|avatar\/gesture\/GestureEngine\.ts|renderer\/)|extension\/src\/(content|offscreen)\//;
+    expect(rel(files).filter((f) => forbidden.test(f))).toEqual([]);
+  });
+
+  it('recorded samples stay in the offscreen document: the recorder exports only a blob URL', () => {
+    const recorder = code(resolve(EXT, 'src/offscreen/CalibrationRecorder.ts'));
+    expect(recorder).not.toMatch(/chrome\.runtime|broadcast|localStorage|indexedDB|chrome\.storage/);
+    for (const m of recorder.matchAll(/postMessage\(([^;]*)\)/g)) expect(m[1]).toMatch(/type: 'stop'/);
+    // The worklet has no outputs: it records, it never plays.
+    expect(recorder).toMatch(/numberOfOutputs: 0/);
+    const exporter = code(resolve(EXT, 'src/calibration-export/export.ts'));
+    expect(exporter).toMatch(/startsWith\('blob:'\)/);
+  });
+
+  it('is part of the lazy Developer Tools chunk: the content runtime imports calibration types only', () => {
+    const runtime = readFileSync(resolve(EXT, 'src/content/avatar-runtime.ts'), 'utf8');
+    const staticImports = [...runtime.matchAll(/^import (?!type)[^;]*from '([^']+)'/gm)].map((m) => m[1]!);
+    expect(staticImports.filter((s) => s.includes('calibration'))).toEqual([]);
+    const { files } = graph(resolve(EXT, 'src/content/content.ts'));
+    expect(rel(files).filter((f) => f.includes('/calibration'))).toEqual([]);
+  });
+});

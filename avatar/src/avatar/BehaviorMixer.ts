@@ -67,6 +67,52 @@ export const DEFAULT_EMOTION_MIX: Readonly<EmotionMixConfig> = Object.freeze({
   expressionBudget: 0.45,
 });
 
+/** Pose channels whose sources are attributed (see PoseAttribution). */
+export const ATTRIBUTED_CHANNELS = [
+  'headYaw',
+  'headPitch',
+  'headRoll',
+  'lean',
+  'bodyYaw',
+  'bodyRoll',
+  'shoulderLeft',
+  'shoulderRight',
+] as const;
+export type AttributedChannel = (typeof ATTRIBUTED_CHANNELS)[number];
+
+/**
+ * Where one pose channel's value came from, radians. The sources add up to `sum`; `final` is what Avatar received
+ * after the POSE_LIMITS clamp. BehaviorMixer multiplies idle by the state, reaction and emotion gains, so their
+ * shares are the differences those gains made, applied in that order:
+ *   idle     = idle × state multiplier
+ *   reaction = the reaction gain's share of the scaled idle, plus its own offsets (lean, chin lift)
+ *   emotion  = the emotion gain's share of the scaled idle, plus its own offsets (lean)
+ *   state    = the state profile's fixed offset
+ *   gesture  = the gesture after its GESTURE_LIMITS clamp; `gestureRequested` is before that clamp
+ */
+export interface ChannelAttribution {
+  final: number;
+  sum: number;
+  gestureRequested: number;
+  sources: { idle: number; state: number; reaction: number; emotion: number; gesture: number };
+}
+
+export type PoseAttribution = Record<AttributedChannel, ChannelAttribution> & {
+  /** Largest absolute arm offset (all arm bones and axes): gestures only. */
+  arms: { final: number; gestureRequested: number };
+};
+
+function createAttribution(): PoseAttribution {
+  const channel = (): ChannelAttribution => ({
+    final: 0,
+    sum: 0,
+    gestureRequested: 0,
+    sources: { idle: 0, state: 0, reaction: 0, emotion: 0, gesture: 0 },
+  });
+  const a = Object.fromEntries(ATTRIBUTED_CHANNELS.map((c) => [c, channel()])) as Record<AttributedChannel, ChannelAttribution>;
+  return { ...a, arms: { final: 0, gestureRequested: 0 } };
+}
+
 /** Effective weights of the last compose(), for diagnostics and tests. */
 export interface EmotionMixState {
   /** State weight × debug gain × confidence of the assistant channel. */
@@ -91,6 +137,7 @@ export class BehaviorMixer {
   readonly emotionConfig: EmotionMixConfig;
   private readonly out: ProceduralPose = { ...EMPTY_PROCEDURAL_POSE };
   private readonly mix: EmotionMixState = { assistant: 0, user: 0 };
+  private attributionOut: PoseAttribution | null = null;
 
   constructor(emotionConfig: Partial<EmotionMixConfig> = {}) {
     this.emotionConfig = { ...DEFAULT_EMOTION_MIX, ...emotionConfig };
@@ -99,6 +146,19 @@ export class BehaviorMixer {
   /** Effective emotion weights of the last compose(). */
   get emotionMix(): Readonly<EmotionMixState> {
     return this.mix;
+  }
+
+  /**
+   * Per-source attribution of the head/body channels (calibration). Off by default: compose() then does no extra
+   * work. Diagnostics only: it never changes the pose.
+   */
+  setAttributionEnabled(on: boolean): void {
+    this.attributionOut = on ? (this.attributionOut ?? createAttribution()) : null;
+  }
+
+  /** Attribution of the last compose(), mutated in place; null while disabled. */
+  get attribution(): Readonly<PoseAttribution> | null {
+    return this.attributionOut;
   }
 
   /** Result of the last compose(). Mutated in place every frame. */
@@ -214,6 +274,46 @@ export class BehaviorMixer {
     }
 
     this.composeExpressions(o, emotion, wa, wu, ea, eu, aArousal, aTension, uTension);
+    const at = this.attributionOut;
+    if (at) {
+      // Same terms as above, split by source (see ChannelAttribution). Only runs while calibration asked for it.
+      const base = state.headMotionMultiplier;
+      const react = base * (1 + REACTION_LIMITS.headMotionGain * engagement);
+      const head3 = [
+        ['headYaw', idle.headYaw, state.headYawOffset, 0, gh.yaw, L.headYaw],
+        ['headPitch', idle.headPitch, state.headPitchOffset, -REACTION_LIMITS.pitchLift * lift, gh.pitch, L.headPitch],
+        ['headRoll', idle.headRoll, state.headRollOffset, 0, gh.roll, L.headRoll],
+      ] as const;
+      for (const [key, i, offset, reactionOffset, g, limit] of head3) {
+        const idleShare = finite(i * base);
+        attribute(at[key], o[key], idleShare, offset, finite(i * react) - idleShare + reactionOffset, finite(i * react * emotionHead) - finite(i * react), g, limit);
+      }
+      attribute(
+        at.lean,
+        o.lean,
+        idle.lean,
+        state.leanOffset,
+        REACTION_LIMITS.lean * engagement,
+        c.assistantLean * Math.max(0, aArousal) * ea + c.userLean * Math.max(0, uArousal) * eu,
+        gb.lean,
+        L.bodyLean,
+      );
+      attribute(at.bodyYaw, o.bodyYaw, 0, 0, 0, 0, gb.yaw, L.bodyYaw);
+      attribute(at.bodyRoll, o.bodyRoll, 0, 0, 0, 0, gb.roll, L.bodyRoll);
+      attribute(at.shoulderLeft, o.shoulderLeft, 0, 0, 0, 0, gesture.shoulders.left, L.shoulder);
+      attribute(at.shoulderRight, o.shoulderRight, 0, 0, 0, 0, gesture.shoulders.right, L.shoulder);
+      let armFinal = 0;
+      let armRequested = 0;
+      for (const bone of ['leftUpperArm', 'leftLowerArm', 'rightUpperArm', 'rightLowerArm'] as const) {
+        for (const axis of ['x', 'y', 'z'] as const) {
+          armRequested = Math.max(armRequested, Math.abs(finite(arms[bone][axis])));
+          const axisKey = `${bone}${axis.toUpperCase()}` as keyof ProceduralPose;
+          armFinal = Math.max(armFinal, Math.abs(o[axisKey]));
+        }
+      }
+      at.arms.final = armFinal;
+      at.arms.gestureRequested = armRequested;
+    }
     return o;
   }
 
@@ -254,6 +354,31 @@ export class BehaviorMixer {
       for (const e of EMOTION_EXPRESSIONS) o[e] *= k;
     }
   }
+}
+
+function attribute(
+  a: ChannelAttribution,
+  final: number,
+  idle: number,
+  state: number,
+  reaction: number,
+  emotion: number,
+  gestureRequested: number,
+  gestureLimit: number,
+): void {
+  const s = a.sources;
+  s.idle = finite(idle);
+  s.state = finite(state);
+  s.reaction = finite(reaction);
+  s.emotion = finite(emotion);
+  s.gesture = sym(gestureRequested, gestureLimit);
+  a.gestureRequested = finite(gestureRequested);
+  a.sum = s.idle + s.state + s.reaction + s.emotion + s.gesture;
+  a.final = final;
+}
+
+function finite(v: number): number {
+  return Number.isFinite(v) ? v : 0;
 }
 
 /** Clamp to [−limit, limit]; NaN/±Infinity → 0. */

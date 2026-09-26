@@ -7,7 +7,7 @@ import { EMOTION_CHANNELS, isEmotionFrame, type EmotionChannel, type EmotionFram
  * Bump when a message changes shape: contexts of different versions (content scripts left over from before an
  * extension update) then ignore each other instead of misreading.
  */
-export const PROTOCOL_VERSION = 4;
+export const PROTOCOL_VERSION = 5;
 
 /** Port the content script opens to the offscreen document to receive lip-sync frames for its tab. */
 export const LIPSYNC_PORT = 'prosopon:lipsync';
@@ -97,6 +97,27 @@ export interface DevTelemetry {
   micWorklet: boolean;
 }
 
+/** Calibration recording channel (Developer Mode wizard): the assistant's tab audio or the user's microphone. */
+export type CalibrationChannel = 'assistant' | 'user';
+
+/** Largest text chunk of one calibration:file message, characters (bigger files are sent in parts). */
+export const CALIBRATION_FILE_CHUNK = 4_000_000;
+
+/** Reply to every calibration:* request, over the same port. `data` depends on the request (see CalibrationAudio). */
+export interface CalibrationReply {
+  requestId: number;
+  ok: boolean;
+  error?: string;
+  data?: Record<string, unknown>;
+}
+
+/** Reply to calibration:bundle (export page): the built ZIP as a same-origin blob URL, or null when none exists. */
+export interface CalibrationBundleInfo {
+  name: string;
+  url: string;
+  bytes: number;
+}
+
 export type ExtensionPayload =
   /** SW → offscreen. Reply: CaptureReply. */
   | { type: 'capture:start'; tabId: number; streamId: string }
@@ -166,7 +187,25 @@ export type ExtensionPayload =
    * Content → offscreen over LIPSYNC_PORT, development builds only: switch the viseme analyser, or drop it with
    * 'none' to exercise the amplitude fallback against real audio. Ignored by production builds.
    */
-  | { type: 'debug:analyzer'; choice: 'headaudio' | 'wlipsync' | 'none' };
+  | { type: 'debug:analyzer'; choice: 'headaudio' | 'wlipsync' | 'none' }
+  /**
+   * Calibration wizard (Developer Mode), content → offscreen over LIPSYNC_PORT; each gets a calibration:reply.
+   * Recording exists only between begin and discard/build: audio is kept in the offscreen document's memory, packed
+   * into the ZIP there, and never crosses a context (only its blob URL does, to the export page).
+   */
+  | { type: 'calibration:begin'; requestId: number }
+  | { type: 'calibration:record'; requestId: number; clipId: string; channel: CalibrationChannel; action: 'start' | 'stop' }
+  /** A text file of the bundle (trace, results, reports), in parts of at most CALIBRATION_FILE_CHUNK characters. */
+  | { type: 'calibration:file'; requestId: number; name: string; text: string; append: boolean }
+  | { type: 'calibration:build'; requestId: number; fileName: string }
+  /** Drops every recording and any built bundle. Also sent by the export page (no port: requestId 0). */
+  | { type: 'calibration:discard'; requestId: number }
+  /** Offscreen → content over LIPSYNC_PORT. */
+  | { type: 'calibration:reply'; reply: CalibrationReply }
+  /** Content → SW: open the export page for the built bundle. */
+  | { type: 'calibration:open-export' }
+  /** Export page → offscreen. Reply: CalibrationBundleInfo | null. */
+  | { type: 'calibration:bundle' };
 
 export type ExtensionMessage = ExtensionPayload & { v: typeof PROTOCOL_VERSION };
 export type MessageType = ExtensionMessage['type'];
@@ -221,6 +260,34 @@ const VALIDATORS: Record<MessageType, Validator> = {
   'user:status': (m) => isMicStatus(m.status),
   'extension:error': (m) => typeof m.error === 'string',
   'debug:analyzer': (m) => m.choice === 'headaudio' || m.choice === 'wlipsync' || m.choice === 'none',
+  'calibration:begin': (m) => isRequestId(m.requestId),
+  'calibration:record': (m) =>
+    isRequestId(m.requestId) &&
+    typeof m.clipId === 'string' &&
+    isClipId(m.clipId) &&
+    (m.channel === 'assistant' || m.channel === 'user') &&
+    (m.action === 'start' || m.action === 'stop'),
+  'calibration:file': (m) =>
+    isRequestId(m.requestId) &&
+    isBundlePath(m.name) &&
+    typeof m.text === 'string' &&
+    m.text.length <= CALIBRATION_FILE_CHUNK &&
+    typeof m.append === 'boolean',
+  'calibration:build': (m) => isRequestId(m.requestId) && typeof m.fileName === 'string' && /^[\w.-]{1,120}\.zip$/.test(m.fileName),
+  'calibration:discard': (m) => isRequestId(m.requestId),
+  'calibration:reply': (m) => {
+    const r = m.reply as Record<string, unknown> | null;
+    return (
+      !!r &&
+      typeof r === 'object' &&
+      isRequestId(r.requestId) &&
+      typeof r.ok === 'boolean' &&
+      (r.error === undefined || typeof r.error === 'string') &&
+      (r.data === undefined || (!!r.data && typeof r.data === 'object' && !Array.isArray(r.data)))
+    );
+  },
+  'calibration:open-export': () => true,
+  'calibration:bundle': () => true,
   'emotion:frame': (m) => EMOTION_CHANNELS.includes(m.channel as EmotionChannel) && isEmotionFrame(m.frame),
   'emotion:status': (m) => isEmotionStatus(m.status),
   'dev:subscribe': (m) => typeof m.enabled === 'boolean',
@@ -305,6 +372,20 @@ export function isMicStatus(raw: unknown): raw is MicStatus {
   if (!raw || typeof raw !== 'object') return false;
   const s = raw as Record<string, unknown>;
   return MIC_STATES.includes(s.state as MicState) && (s.error === undefined || typeof s.error === 'string');
+}
+
+function isRequestId(v: unknown): v is number {
+  return typeof v === 'number' && Number.isInteger(v) && v >= 0;
+}
+
+/** A calibration clip id, e.g. "assistant/ru/ru.question.normal.retry1": becomes audio/<id>.wav in the bundle. */
+export function isClipId(v: unknown): v is string {
+  return typeof v === 'string' && v.length <= 120 && /^[\w-]+(\/[\w.-]+)*$/.test(v) && !v.split('/').includes('..');
+}
+
+/** A relative path inside the calibration bundle: no absolute paths, no "..", plain characters. */
+export function isBundlePath(v: unknown): v is string {
+  return typeof v === 'string' && /^[\w-]+(\/[\w.-]+)*\.(json|jsonl|md|wav)$/.test(v) && !v.split('/').includes('..') && v.length <= 160;
 }
 
 function isTabId(v: unknown): v is number {

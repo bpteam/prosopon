@@ -20,6 +20,7 @@ import { RenderLoop } from '@avatar/renderer/RenderLoop';
 import { GESTURE_TYPES } from '@avatar/avatar/gesture/Gesture';
 import {
   describeError,
+  type CalibrationReply,
   type AudioStatus,
   type DevTelemetry,
   type EmotionStatus,
@@ -48,9 +49,22 @@ import type { DevBridge, DevSample } from '../ui/dev/DevBridge';
 import { DevModeSwitch } from './DevModeSwitch';
 import { ManualControls } from '../ui/dev/ManualControls';
 import { AvatarOverlay } from './AvatarOverlay';
-import { ChatGPTAdapter, type ChatGPTAdapterDebugSnapshot, type ConversationUiAdapter, type VoiceUiSnapshot } from './ChatGPTAdapter';
+import { ChatGPTAdapter, type ChatGPTAdapterDebugSnapshot, type ConversationAutomation, type ConversationUiAdapter, type VoiceUiSnapshot } from './ChatGPTAdapter';
 import { ConversationSignalResolver, type ConversationSignals } from './ConversationSignalResolver';
 import { SemanticFeed } from './SemanticFeed';
+import { DEFAULT_EMOTION_MIX } from '@avatar/avatar/BehaviorMixer';
+import { GESTURE_CONFIG, GESTURE_LIMITS } from '@avatar/avatar/gesture/GestureConfig';
+import { SEMANTIC_GESTURE_CONFIG } from '@avatar/avatar/gesture/SemanticGestureConfig';
+import { REACTION_LIMITS } from '@avatar/avatar/UserReaction';
+import { DEFAULT_USER_REACTION_CONFIG } from '@avatar/avatar/UserReactionMapper';
+import { POSE_LIMITS } from '@avatar/avatar/BodyPose';
+import { STATE_PROFILES, STATE_TRANSITION_DURATION } from '@avatar/avatar/AvatarStateProfiles';
+import { DEFAULT_PROSODY_EMOTION_CONFIG } from '@avatar/audio/emotion/ProsodyEmotionAnalyzer';
+import { DEFAULT_VAD_CONFIG } from '@avatar/audio/user/VoiceActivityDetector';
+import { SEMANTIC_PACER_CONFIG } from '@avatar/semantic/SemanticPacer';
+import { SEMANTIC_CONFIG } from '@avatar/semantic/SemanticConfig';
+import type { BuildInfo, CalibrationHost, CalibrationLanguage, CalibrationRequest } from '../calibration/types';
+import type { ScenarioOptions } from '../calibration/scenarios';
 
 /**
  * Avatar side of the content script, loaded on activation only (three.js + three-vrm stay off chatgpt.com until
@@ -75,12 +89,14 @@ export interface AvatarRuntimeOptions {
   debug: boolean;
   /** Reports failures that leave ChatGPT untouched but the avatar degraded (VRM didn't load). */
   onError?: (error: string) => void;
-  adapter?: ConversationUiAdapter;
+  adapter?: ConversationUiAdapter & ConversationAutomation;
   doc?: Document;
   /** Persistent UI settings (chrome.storage.local by default). */
   settingsArea?: SettingsArea;
   /** Sends to the offscreen document over the frame port (dev:subscribe). No-op while disconnected. */
   sendToOffscreen?: (payload: ExtensionPayload) => void;
+  /** Sends to the service worker (calibration: microphone opt-in, export page). */
+  sendToWorker?: (payload: ExtensionPayload) => Promise<unknown>;
 }
 
 export interface Diagnostics {
@@ -157,6 +173,8 @@ export interface AvatarRuntimeHandle {
   setPlacementMode(active: boolean): void;
   /** Offscreen developer telemetry (only arrives while Developer Mode subscribed to it). */
   pushTelemetry(telemetry: DevTelemetry): void;
+  /** Offscreen answer to a calibration request (Developer Mode wizard). */
+  pushCalibrationReply(reply: CalibrationReply): void;
   readonly diagnostics: Readonly<Diagnostics>;
   dispose(): void;
 }
@@ -182,6 +200,15 @@ const GESTURE_DEBUG_EVENT = 'prosopon:gesture';
  * detail: { enabled?: boolean, pacing?: boolean, probabilityScale?: number }
  */
 const SEMANTIC_DEBUG_EVENT = 'prosopon:semantic';
+/**
+ * Debug hook (development/E2E): a smaller calibration run for the next Start, e.g.
+ *   document.dispatchEvent(new CustomEvent('prosopon:calibration', { detail: { languages: ['en'], categories: ['question.normal'], user: false } }))
+ */
+const CALIBRATION_DEBUG_EVENT = 'prosopon:calibration';
+
+declare const __PROSOPON_BUILD__: { commit: string; dirty: boolean | null; mode: string; builtAt: string } | undefined;
+/** Offscreen calibration replies slower than this fail the request, ms. */
+const CALIBRATION_REQUEST_TIMEOUT = 60_000;
 
 export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle {
   const doc = options.doc ?? document;
@@ -264,6 +291,21 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
     doc.addEventListener(EMOTION_DEBUG_EVENT, onEmotionDebug);
     doc.addEventListener(GESTURE_DEBUG_EVENT, onGestureDebug);
     doc.addEventListener(SEMANTIC_DEBUG_EVENT, onSemanticDebug);
+    doc.addEventListener(CALIBRATION_DEBUG_EVENT, onCalibrationDebug);
+  }
+  let calibrationScenario: ScenarioOptions | undefined;
+  function onCalibrationDebug(event: Event): void {
+    const d = (event as CustomEvent<Record<string, unknown> | null>).detail;
+    if (!d || typeof d !== 'object') return;
+    const strings = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : undefined);
+    // The calibration modules live in the Developer Tools chunk; only their types are imported here.
+    const known: readonly string[] = ['ru', 'uk', 'en', 'es'] satisfies readonly CalibrationLanguage[];
+    const languages = strings(d.languages)?.filter((l): l is CalibrationLanguage => known.includes(l));
+    calibrationScenario = {
+      ...(languages?.length ? { languages } : {}),
+      ...(strings(d.categories) ? { categories: strings(d.categories) } : {}),
+      ...(typeof d.user === 'boolean' ? { user: d.user } : {}),
+    };
   }
   function setSemanticEnabled(on: boolean): void {
     semantic?.setEnabled(on);
@@ -516,6 +558,7 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
       if (!enabled) telemetry = null;
       sendTelemetryRequest();
     },
+    calibration: calibrationHost(),
   };
 
   overlay.host.dataset.devMode = 'false';
@@ -540,6 +583,134 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
     if (!disposed) devMode.set(on);
   };
   const offDevMode = devModeSetting.onChange(setDevMode);
+
+  // --- Calibration wizard (Developer Mode → Calibration): read-only probes plus the recorder requests ------------
+
+  const calibrationRequests = new Map<number, { resolve: (r: CalibrationReply) => void; timer: ReturnType<typeof setTimeout> }>();
+  let nextCalibrationRequest = 1;
+
+  function calibrationHost(): CalibrationHost {
+    const epoch = () => performance.timeOrigin + performance.now();
+    const b = typeof __PROSOPON_BUILD__ === 'object' && __PROSOPON_BUILD__ ? __PROSOPON_BUILD__ : { commit: 'unknown', dirty: null, mode: 'unknown', builtAt: '' };
+    let version = 'unknown';
+    try {
+      version = chrome.runtime.getManifest().version;
+    } catch {
+      // Outside an extension (tests).
+    }
+    const build: BuildInfo = { ...b, version };
+    return {
+      build,
+      get scenarioOptions() {
+        return calibrationScenario;
+      },
+      read() {
+        const conv = resolver.diagnostics;
+        const g = gestures.current;
+        const feed = semantic?.status;
+        const st = gestures.semanticStatus;
+        const r = controller.reaction;
+        const mix = controller.emotionMix;
+        return {
+          t: epoch(),
+          state: conv.resolved,
+          signals: { voiceUi: conv.signals.voiceUiActive, userSpeaking: conv.signals.userSpeaking, assistantSpeaking: conv.signals.assistantSpeaking },
+          crosstalkEvents: conv.crosstalkEvents,
+          suppressedInterruptions: conv.suppressedInterruptions,
+          lipSync: { active: diag.audioActive, volume: diag.volume, mode: diag.lipSyncMode },
+          mic: diag.mic.state,
+          user: diag.userVoice,
+          emotion: { assistant: diag.emotion.assistant, user: diag.emotion.user },
+          mix: { assistant: mix.assistant, user: mix.user },
+          reaction: { engagement: r.engagement, pitchLift: r.pitchLift, speaking: r.speaking, utteranceEnds: r.utteranceEnds },
+          gesture: {
+            type: g.type,
+            phase: g.phase,
+            progress: g.progress,
+            intensity: g.intensity,
+            priority: gestures.currentPriority,
+            count: gestures.history.gestureCount,
+            cooldown: gestures.cooldownRemaining,
+          },
+          attribution: controller.attribution,
+          semantic: {
+            available: semantic !== null,
+            pending: (feed?.pacer.pending ?? 0) + st.queued,
+            dropped: feed?.pacer.dropped ?? 0,
+            spokenChars: feed?.pacer.spokenChars ?? 0,
+            mode: feed?.pacer.mode ?? 'off',
+            intents: st.intents,
+            accepted: st.accepted,
+          },
+        };
+      },
+      setAttribution: (on) => controller.setAttributionEnabled(on),
+      semantic: {
+        observe(observer) {
+          if (semantic) semantic.observer = observer;
+        },
+        decisions: () => gestures.semanticStatus.decisions,
+      },
+      chat: adapter,
+      offscreen(request: CalibrationRequest) {
+        const requestId = nextCalibrationRequest++;
+        return new Promise<CalibrationReply>((resolve) => {
+          if (!diag.offscreenConnected || !options.sendToOffscreen) {
+            resolve({ requestId, ok: false, error: 'offscreen document not connected' });
+            return;
+          }
+          const timer = setTimeout(() => {
+            calibrationRequests.delete(requestId);
+            resolve({ requestId, ok: false, error: `${request.type} timed out` });
+          }, CALIBRATION_REQUEST_TIMEOUT);
+          calibrationRequests.set(requestId, { resolve, timer });
+          options.sendToOffscreen!({ ...request, requestId } as ExtensionPayload);
+        });
+      },
+      async requestMicReactions() {
+        await options.sendToWorker?.({ type: 'mic:set-preference', enabled: true });
+      },
+      openExport() {
+        void options.sendToWorker?.({ type: 'calibration:open-export' }).catch(() => undefined);
+      },
+      configSnapshot: () => ({
+        GESTURE_CONFIG: { defaults: GESTURE_CONFIG, live: gestures.config },
+        GESTURE_LIMITS,
+        POSE_LIMITS,
+        SEMANTIC_GESTURE_CONFIG: { defaults: SEMANTIC_GESTURE_CONFIG, live: gestures.semantic.config },
+        SEMANTIC_CONFIG,
+        SEMANTIC_PACER_CONFIG: semantic?.pacer.config ?? SEMANTIC_PACER_CONFIG,
+        DEFAULT_EMOTION_MIX: { defaults: DEFAULT_EMOTION_MIX, live: controller.emotionConfig },
+        DEFAULT_PROSODY_EMOTION_CONFIG,
+        REACTION_LIMITS,
+        USER_REACTION_CONFIG: DEFAULT_USER_REACTION_CONFIG,
+        VAD_CONFIG: DEFAULT_VAD_CONFIG,
+        conversationStateTimings: { resolver: resolver.config, stateTransitionDuration: STATE_TRANSITION_DURATION },
+        STATE_PROFILES,
+        semanticFeed: { enabled: semantic?.enabled ?? false, pacing: semantic?.status.pacing ?? false },
+      }),
+      environment: () => ({
+        avatarLoaded: diag.avatarLoaded,
+        modelUrl: options.assetUrl(MODEL_PATH),
+        modelName: MODEL_PATH.split('/').pop() ?? MODEL_PATH,
+        offscreenConnected: diag.offscreenConnected,
+        mic: diag.mic,
+        emotionStatus: diag.emotionStatus,
+        lipSyncMode: diag.lipSyncMode,
+        analyzer: diag.analyzer,
+        voiceUi: diag.voiceUi,
+      }),
+      async modelHash() {
+        try {
+          const bytes = await (await fetch(options.assetUrl(MODEL_PATH))).arrayBuffer();
+          const digest = await crypto.subtle.digest('SHA-256', bytes);
+          return [...new Uint8Array(digest)].map((x) => x.toString(16).padStart(2, '0')).join('');
+        } catch {
+          return null;
+        }
+      },
+    };
+  }
 
   function sampleDiagnostics(): DevSample {
     const conv = resolver.diagnostics;
@@ -830,6 +1001,11 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
         return;
       }
       telemetry = null;
+      for (const [id, pending] of calibrationRequests) {
+        clearTimeout(pending.timer);
+        pending.resolve({ requestId: id, ok: false, error: 'offscreen document disconnected' });
+      }
+      calibrationRequests.clear();
       mouth.reset();
       diag.audioActive = false;
       resolver.setAssistantAudioActive(false);
@@ -848,6 +1024,13 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
       telemetry = t;
       devMode.handle?.pushTelemetry(t);
     },
+    pushCalibrationReply(reply) {
+      const pending = calibrationRequests.get(reply.requestId);
+      if (!pending) return;
+      calibrationRequests.delete(reply.requestId);
+      clearTimeout(pending.timer);
+      pending.resolve(reply);
+    },
     dispose() {
       if (disposed) return;
       disposed = true;
@@ -857,6 +1040,7 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
       doc.removeEventListener(EMOTION_DEBUG_EVENT, onEmotionDebug);
       doc.removeEventListener(GESTURE_DEBUG_EVENT, onGestureDebug);
       doc.removeEventListener(SEMANTIC_DEBUG_EVENT, onSemanticDebug);
+      doc.removeEventListener(CALIBRATION_DEBUG_EVENT, onCalibrationDebug);
       semantic?.dispose();
       if (window.__PROSOPON_DEBUG__?.diagnostics === diag) delete window.__PROSOPON_DEBUG__;
       restoreOrb?.();

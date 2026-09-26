@@ -87,6 +87,24 @@ export class UserVoicePipeline {
     };
   }
 
+  /**
+   * Connects `node` to the microphone's source (the calibration recorder). Goes through the same edge check as the
+   * analysis graph, so the mic still can't reach the speakers. @returns disconnect
+   */
+  tap(node: AudioNode): () => void {
+    const graph = this.graph;
+    if (!graph?.source) throw new Error('microphone is not running');
+    this.link(graph, graph.source, node);
+    const source = graph.source;
+    return () => {
+      try {
+        source.disconnect(node);
+      } catch {
+        // The graph was torn down already.
+      }
+    };
+  }
+
   /** Opens the mic and starts analysing. Idempotent while starting/on. Resolves with the settled status. */
   async start(): Promise<MicStatus> {
     if (this.graph || this.statusValue.state === 'starting') return this.statusValue;

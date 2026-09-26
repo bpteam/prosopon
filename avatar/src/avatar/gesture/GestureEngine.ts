@@ -168,6 +168,11 @@ export class GestureEngine implements GestureSource {
     return this.active ? 0 : Math.max(0, this.cooldown);
   }
 
+  /** Priority (GESTURE_PRIORITY) of the running gesture; null when none runs. Tells who started it. */
+  get currentPriority(): number | null {
+    return this.active ? this.running.priority : null;
+  }
+
   get history(): Readonly<GestureHistory> {
     return this.hist;
   }

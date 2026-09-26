@@ -100,7 +100,8 @@ Rules marked *(tested)* are enforced by `avatar/tests/unit/architecture.test.ts`
    `AudioNode`, `AudioContext` or `MediaStream`. Only compact numeric frames cross the boundary.
 4. **Gesture code is renderer-free** *(tested)*. `avatar/src/avatar/gesture/` imports no Avatar, AvatarController,
    three or three-vrm, not even as types. `GestureEngine` emits `GestureFrame`s; it never touches bones.
-5. **ChatGPT DOM is isolated** *(tested)*. All ChatGPT selectors and DOM knowledge live in `ChatGPTAdapter`
+5. **ChatGPT DOM is isolated** *(tested)*. All ChatGPT selectors and DOM knowledge (including the calibration
+   wizard's automation: composer, send, new chat, voice start, mute, voice detection) live in `ChatGPTAdapter`
    (`CHATGPT_SELECTORS`). Selector breakage is fixed there and nowhere else.
 6. **One conversation-state resolver** *(tested)*. Audio processors emit signals; only `ConversationSignalResolver` (extension
    content script) calls `controller.setState()`.
@@ -122,7 +123,9 @@ Rules marked *(tested)* are enforced by `avatar/tests/unit/architecture.test.ts`
 14. **No raw audio across extension contexts** *(tested)*. Frames (`LipSyncFrame`, `UserVoiceFrame`, `EmotionFrame`, status)
     travel over the typed protocol (`PROTOCOL_VERSION` in `extension/src/shared/messages.ts`). PCM chunks for the
     local model stay inside the offscreen runtime and its dedicated same-origin inference Worker; they never cross
-    an extension context.
+    an extension context. The calibration wizard's recordings (Developer mode, only while it runs) also stay in the
+    offscreen document; the finished ZIP leaves it only as a same-origin `blob:` URL handed to the extension's export
+    page, which downloads it.
 15. **Executable code is local.** No remote JS/WASM. The only network fetch is the pinned emotion model download.
 16. **Delta-time everywhere.** Animation integrates `delta`; discrete events split delta at their boundary, so
     30/60/120 FPS give the same result.
@@ -140,7 +143,8 @@ Rules marked *(tested)* are enforced by `avatar/tests/unit/architecture.test.ts`
     wins over them.
 19. **Developer Mode off costs nothing** *(tested)*. With `prosopon.developerMode` false no Dev UI chunk is loaded, no
     history, charts, observers, telemetry or windows exist; the UI never runs its own `requestAnimationFrame` or
-    `setInterval` (sampling is driven by the render loop).
+    `setInterval` (sampling is driven by the render loop). The calibration wizard is part of that chunk and is ticked
+    by the same frame callback; `BehaviorMixer` attribution is computed only while a calibration runs.
 
 Do not delete or weaken architecture tests because they make a new implementation inconvenient.
 
@@ -306,6 +310,7 @@ MV3, Chrome 116+, active only on `https://chatgpt.com/*`.
 | content script | `ChatGPTAdapter`, `AvatarOverlay` (full-viewport, click-through shadow root), `UiLayer` (in-page UI shadow root), `AvatarController`, `ConversationSignalResolver`, `FrameMouthSource`, `SemanticFeed` (reply text → gesture intents), Developer Mode (lazy chunk) | audio nodes, PCM, streams |
 | popup | avatar on/off, microphone reactions, avatar layout (preset, size, *Move avatar*), emotion model install/enable/disable/remove, Developer mode switch | analysis, rendering, Three.js |
 | permission page | one-time microphone grant for the extension origin | analysis |
+| calibration export page | downloads the calibration ZIP (a `blob:` URL from the offscreen document), *Discard* | analysis, network |
 
 The manifest content script is ~4 kB and inert until enabled; Three.js and the avatar runtime are imported from
 `web_accessible_resources` only on activation. Tab audio is captured with `chrome.tabCapture` and played back from
@@ -353,15 +358,22 @@ Tab audio, microphone audio, model inference and reply-text analysis are process
 not uploaded, recorded or stored. The only network request Prosopon makes is the one-time pinned model download
 (none in the embedded build).
 
+One exception, explicit and Developer-mode only: while the [calibration wizard](docs/calibration-wizard.md) runs
+(after the user presses *Start*, which states it), assistant and microphone audio and the reply text are held in
+memory in the offscreen document and packed into a ZIP the user downloads. Nothing is uploaded; *Discard*, turning
+Developer mode off or ending the tab's capture deletes them; nothing is written to extension storage.
+
 ### 5.14 Development tooling
 
 - Sandbox (`avatar/`, `npm run dev`): lil-gui panels (Avatar, Lip Sync / Visemes, Emotion / Prosody, Gestures, Semantic),
   debug overlay, `window.__AVATAR_DEBUG__`, URL params `?analyzer=` and `?gestureSeed=`.
 - Extension Developer mode (every build, off by default): Debug HUD, Developer Tools (incl. a *Semantic* tab:
-  segments, cues, decisions with skip reasons), Avatar Controls, quick toolbar; no lil-gui in the extension.
+  segments, cues, decisions with skip reasons, and a *Calibration* tab: the real-voice calibration wizard, see
+  [docs/calibration-wizard.md](docs/calibration-wizard.md)), Avatar Controls, quick toolbar; no lil-gui in the
+  extension.
 - Extension development builds: diagnostics `data-*` attributes on the overlay host, `window.__PROSOPON_DEBUG__`
   (content-script world), page events `prosopon:debug` / `prosopon:gesture` / `prosopon:emotion` /
-  `prosopon:semantic`, service-worker E2E
+  `prosopon:semantic` / `prosopon:calibration`, service-worker E2E
   hook. None exist in production builds.
 - Tests: Vitest unit + architecture tests in both packages; Playwright E2E for the sandbox and for the unpacked
   extension (real tab capture, fake microphone, WebGPU via SwiftShader).
@@ -391,8 +403,12 @@ Debug APIs are development-only and must not become runtime dependencies.
   browser echo cancellation, the 300 ms interruption minimum and muting user reactions while the assistant speaks.
   Whether ChatGPT's own echo cancellation still works while the tab is captured is unverified. Headphones are the
   safe setup.
-- **Calibration.** VAD, pitch, prosody and gesture thresholds are tuned on synthetic signals; real mic / real
-  ChatGPT voice calibration is manual ([docs/](docs/)).
+- **Calibration.** VAD, pitch, prosody and gesture thresholds are tuned on synthetic signals. The calibration
+  wizard collects real-voice data but tunes nothing; its ChatGPT automation (typing a prompt during Voice, the
+  composer/send/new-chat/voice/mute selectors, voice-name detection, reply text in voice mode) is tested on the
+  fixture only and is unverified on production: manual checks in
+  [docs/calibration-wizard.md](docs/calibration-wizard.md#manual-checks-on-real-chatgptcom). Other procedures are
+  manual ([docs/](docs/)).
 - **Viseme quality.** HeadAudio's model is English; the wLipSync profile is one speaker. Neither is validated on
   Russian or ChatGPT voices.
 - **Latency.** Mouth lags audio by the analysis window + frame interval; `monitorDelay` trades it for audible delay.

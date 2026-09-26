@@ -33,6 +33,12 @@ export interface SemanticFeedStatus {
 
 const RECENT = 12;
 
+/** Watches the feed without changing it (calibration): every analysed intent, and each one the pacer released. */
+export interface SemanticFeedObserver {
+  analyzed?(intent: SemanticIntent): void;
+  released?(intent: SemanticIntent): void;
+}
+
 /**
  * Integration glue of the semantic layer: the adapter's reply text → SemanticAnalyzer → SemanticPacer →
  * GestureEngine. Runs from the render loop (`update`), reads the DOM only through the adapter, only after a
@@ -54,6 +60,8 @@ export class SemanticFeed {
   private on = true;
   private failure: string | null = null;
   private readonly recent: SemanticIntent[] = [];
+  /** Optional observer (calibration); null in normal use. Its exceptions are swallowed, never the feed's. */
+  observer: SemanticFeedObserver | null = null;
 
   constructor(private readonly options: SemanticFeedOptions) {
     this.readInterval = options.readInterval ?? 0.125;
@@ -109,7 +117,10 @@ export class SemanticFeed {
         this.complete = true;
         this.feed(this.current, true);
       }
-      for (const intent of this.pacer.update(dt, voiceActive, assistantSpeaking)) this.options.sink(intent);
+      for (const intent of this.pacer.update(dt, voiceActive, assistantSpeaking)) {
+        this.options.sink(intent);
+        this.observe('released', intent);
+      }
     } catch (error) {
       this.failure = error instanceof Error ? error.message : String(error);
       this.on = false;
@@ -140,6 +151,15 @@ export class SemanticFeed {
       this.recent.push(intent);
       if (this.recent.length > RECENT) this.recent.shift();
       this.pacer.push(intent);
+      this.observe('analyzed', intent);
+    }
+  }
+
+  private observe(kind: keyof SemanticFeedObserver, intent: SemanticIntent): void {
+    try {
+      this.observer?.[kind]?.(intent);
+    } catch {
+      // A diagnostics observer must not switch the semantic layer off.
     }
   }
 }

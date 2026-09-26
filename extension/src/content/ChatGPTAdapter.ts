@@ -44,6 +44,50 @@ export interface ChatGPTAdapterDebugSnapshot {
   observerConnected: boolean;
 }
 
+/** What could be learned about ChatGPT's voice configuration from the page. Nothing here is guessed from elsewhere. */
+export interface ChatGPTVoiceEnvironment {
+  /** The selected voice as ChatGPT names it ("Sol"), normalized to a known spelling when it matches one. */
+  voiceName: string | null;
+  /**
+   * The kind of voice session the page shows, as far as the DOM tells: 'realtime' while the realtime voice orb is
+   * mounted, null otherwise. Never a backend model name.
+   */
+  voiceMode: string | null;
+  /** `<html lang>` of the page. */
+  uiLanguage: string | null;
+  /** Where voiceName came from. */
+  detectedFrom: 'dom' | 'aria' | 'settings' | 'unknown';
+}
+
+/**
+ * Driving ChatGPT for the calibration wizard: a new chat, the composer, the voice session. Typed and DOM-free for
+ * the caller; every method is best effort and reports failure instead of throwing, so the wizard can fall back to
+ * asking the user. Nothing here runs unless the calibration wizard (Developer Mode) calls it.
+ */
+export interface ConversationAutomation {
+  /** Voice names ChatGPT is known to offer (normalization and the manual fallback list only; may be outdated). */
+  readonly knownVoices: readonly string[];
+  detectSelectedVoice(): { name: string; from: ChatGPTVoiceEnvironment['detectedFrom'] } | null;
+  detectVoiceMode(): string | null;
+  detectVoiceEnvironment(): ChatGPTVoiceEnvironment;
+  /** No user or assistant message in the current conversation. */
+  isConversationEmpty(): boolean;
+  /** The message composer exists and is editable. */
+  isComposerReady(): boolean;
+  /** Assistant messages in the thread (to wait for the next one). */
+  countAssistantMessages(): number;
+  /** An empty conversation with a ready composer: the current one if it already is, else a new chat. */
+  ensureFreshChat(timeoutMs?: number): Promise<boolean>;
+  /** Starts ChatGPT Voice (no-op when it runs). Resolves once the voice UI is up, false on timeout. */
+  startVoice(timeoutMs?: number): Promise<boolean>;
+  /** Mutes/unmutes ChatGPT's own microphone in the voice session. False when no such control was found. */
+  setVoiceMicMuted(muted: boolean): Promise<boolean>;
+  /** Types `text` into the composer and sends it. False when the composer or the send control was not found. */
+  sendMessage(text: string, timeoutMs?: number): Promise<boolean>;
+  /** Resolves with the first assistant message after the first `afterCount` ones, or null on timeout. */
+  waitForAssistantMessage(afterCount: number, timeoutMs?: number): Promise<AssistantReply | null>;
+}
+
 export interface VoiceUiSnapshot {
   active: boolean;
   container: HTMLElement | null;
@@ -96,7 +140,36 @@ export const CHATGPT_SELECTORS = {
   messageBody: ['.markdown', '[class*="markdown"]', '[data-markdown-text-style="assistant-message"]'],
   /** Voice Mode keeps its immutable message UUID on this descendant, not on the turn wrapper. */
   messageId: ['[data-chatgpt-selection-message-id]'],
+
+  // --- Calibration wizard only (Developer Mode). NONE of these was verified against production chatgpt.com: they
+  // --- are the long-standing attributes as publicly described. Manual check: docs/calibration-wizard.md.
+
+  /** Any turn of the conversation (empty-chat check); the Voice Mode turn key per assistantMessage above. */
+  anyMessage: ['[data-message-author-role]', '[data-content-search-unit-key$=":assistant"]', '[data-content-search-unit-key$=":user"]'],
+  /** The composer: ProseMirror contenteditable (#prompt-textarea) or a plain textarea on older builds. */
+  composer: ['#prompt-textarea', '[contenteditable="true"][role="textbox"]', 'textarea[name="prompt-textarea"]', 'form textarea'],
+  sendButton: ['[data-testid="send-button"]', '#composer-submit-button', 'button[aria-label="Send prompt" i]', 'button[aria-label*="send" i]'],
+  newChat: ['[data-testid="create-new-chat-button"]', 'a[aria-label="New chat" i]', 'button[aria-label="New chat" i]'],
+  /** Starts a voice session from the composer. */
+  voiceButton: [
+    '[data-testid="composer-speech-button"]',
+    'button[aria-label="Start voice mode" i]',
+    'button[aria-label*="voice mode" i]:not([aria-label*="focus" i])',
+    'button[aria-label="Voice" i]',
+  ],
+  /** ChatGPT's own mic mute in a voice session (aria-pressed or the label tells the state). */
+  voiceMute: ['button[aria-label="Mute microphone" i]', 'button[aria-label="Unmute microphone" i]', 'button[aria-label*="mute" i]'],
+  /** A checked option in a voice picker (menu, radio group, listbox) that may be on the page. */
+  selectedOption: ['[role="menuitemradio"][aria-checked="true"]', '[role="radio"][aria-checked="true"]', '[role="option"][aria-selected="true"]'],
+  /** Elements whose label may name the voice ("Voice: Sol"). */
+  labelled: ['[aria-label*="voice" i]', '[title*="voice" i]'],
 } as const;
+
+/** Voice names ChatGPT offered as of 2026 (normalization only; an unknown name is still reported as is). */
+export const KNOWN_CHATGPT_VOICES = ['Arbor', 'Breeze', 'Cove', 'Ember', 'Juniper', 'Maple', 'Sol', 'Spruce', 'Vale', 'Monday'] as const;
+
+/** Page localStorage keys that may hold the voice setting (read-only; unverified, see CHATGPT_SELECTORS). */
+const VOICE_STORAGE_KEY = /voice/i;
 
 /** Attributes whose changes can show or hide the voice UI. `class` is left out: ChatGPT rewrites it constantly. */
 const OBSERVED_ATTRIBUTES = ['data-testid', 'data-realtime-voice-orb', 'data-thread-focus-mode', 'hidden', 'aria-hidden', 'aria-label', 'role'];
@@ -193,7 +266,9 @@ export function replyText(root: Element): string {
   return out.trim();
 }
 
-export class ChatGPTAdapter implements ConversationUiAdapter {
+export class ChatGPTAdapter implements ConversationUiAdapter, ConversationAutomation {
+  readonly knownVoices: readonly string[] = KNOWN_CHATGPT_VOICES;
+
   /** Ids for messages without `data-message-id` (kept per element, so a re-read gets the same id). */
   private readonly ids = new WeakMap<Element, string>();
   private nextId = 0;
@@ -307,6 +382,161 @@ export class ChatGPTAdapter implements ConversationUiAdapter {
     return { message: null, selector: null };
   }
 
+  // --- Automation (calibration wizard) --------------------------------------------------------------------------
+
+  detectSelectedVoice(): { name: string; from: ChatGPTVoiceEnvironment['detectedFrom'] } | null {
+    // 1. A checked option of a voice picker. Only a known voice name counts: the model picker uses the same roles.
+    for (const el of this.all(CHATGPT_SELECTORS.selectedOption)) {
+      const name = knownVoice(el.getAttribute('aria-label') ?? el.textContent ?? '');
+      if (name) return { name, from: 'aria' };
+    }
+    // 2. A label that names it ("Voice: Sol", "Sol voice").
+    for (const el of this.all(CHATGPT_SELECTORS.labelled)) {
+      const label = `${el.getAttribute('aria-label') ?? ''} ${el.getAttribute('title') ?? ''}`;
+      const name = knownVoice(label) ?? /\bvoice\s*[:\-–]\s*([\p{L}][\p{L}\p{N} ]{1,23})/iu.exec(label)?.[1]?.trim() ?? null;
+      if (name) return { name: knownVoice(name) ?? name, from: 'aria' };
+    }
+    // 3. The page's own stored setting.
+    try {
+      const storage = this.doc.defaultView?.localStorage;
+      if (storage) {
+        for (let i = 0; i < storage.length; i++) {
+          const key = storage.key(i);
+          if (!key || !VOICE_STORAGE_KEY.test(key)) continue;
+          const name = knownVoice(storage.getItem(key) ?? '');
+          if (name) return { name, from: 'settings' };
+        }
+      }
+    } catch {
+      // Storage access can throw (sandboxed frames); detection just fails.
+    }
+    return null;
+  }
+
+  detectVoiceMode(): string | null {
+    // Grounded in a verified attribute only: the realtime voice orb (see CHATGPT_SELECTORS.orb).
+    return this.doc.querySelector('[data-realtime-voice-orb]') ? 'realtime' : null;
+  }
+
+  detectVoiceEnvironment(): ChatGPTVoiceEnvironment {
+    const voice = this.detectSelectedVoice();
+    return {
+      voiceName: voice?.name ?? null,
+      voiceMode: this.detectVoiceMode(),
+      uiLanguage: this.doc.documentElement.getAttribute('lang') || null,
+      detectedFrom: voice?.from ?? 'unknown',
+    };
+  }
+
+  isConversationEmpty(): boolean {
+    return this.first(CHATGPT_SELECTORS.anyMessage) === null;
+  }
+
+  isComposerReady(): boolean {
+    const el = this.first(CHATGPT_SELECTORS.composer);
+    return el !== null && isEditable(el);
+  }
+
+  countAssistantMessages(): number {
+    // Every shape at once (text-chat turns and Voice Mode turns can share a thread), each element once.
+    return this.doc.querySelectorAll(CHATGPT_SELECTORS.assistantMessage.join(', ')).length;
+  }
+
+  async ensureFreshChat(timeoutMs = 8000): Promise<boolean> {
+    if (this.isConversationEmpty() && this.isComposerReady()) return true;
+    const button = this.first(CHATGPT_SELECTORS.newChat);
+    if (!button) return false;
+    button.click();
+    return this.waitFor(() => this.isConversationEmpty() && this.isComposerReady(), timeoutMs);
+  }
+
+  async startVoice(timeoutMs = 10000): Promise<boolean> {
+    if (this.isVoiceModeActive()) return true;
+    const button = this.first(CHATGPT_SELECTORS.voiceButton);
+    if (!button) return false;
+    button.click();
+    return this.waitFor(() => this.isVoiceModeActive(), timeoutMs);
+  }
+
+  async setVoiceMicMuted(muted: boolean): Promise<boolean> {
+    const button = this.first(CHATGPT_SELECTORS.voiceMute);
+    if (!button) return false;
+    const pressed = button.getAttribute('aria-pressed');
+    const label = button.getAttribute('aria-label') ?? '';
+    // "Unmute microphone" is shown while muted; aria-pressed, when present, is the mute state.
+    const isMuted = pressed !== null ? pressed === 'true' : /unmute/i.test(label);
+    if (isMuted !== muted) button.click();
+    return true;
+  }
+
+  async sendMessage(text: string, timeoutMs = 5000): Promise<boolean> {
+    const composer = this.first(CHATGPT_SELECTORS.composer);
+    if (!composer || !isEditable(composer)) return false;
+    composer.focus();
+    if (composer instanceof this.win().HTMLTextAreaElement) {
+      // React tracks the value through the native setter; a plain assignment is invisible to it.
+      const setter = Object.getOwnPropertyDescriptor(this.win().HTMLTextAreaElement.prototype, 'value')?.set;
+      setter?.call(composer, text);
+      composer.dispatchEvent(new (this.win().Event)('input', { bubbles: true }));
+    } else {
+      // ProseMirror: replace the selection through the editing command, which it handles like typing.
+      const selection = this.doc.getSelection();
+      selection?.selectAllChildren(composer);
+      const inserted = typeof this.doc.execCommand === 'function' && this.doc.execCommand('insertText', false, text);
+      if (!inserted) {
+        composer.textContent = text;
+        composer.dispatchEvent(new (this.win().InputEvent)('input', { bubbles: true, inputType: 'insertText', data: text }));
+      }
+    }
+    const ready = await this.waitFor(() => {
+      const b = this.first(CHATGPT_SELECTORS.sendButton);
+      return b !== null && !(b as HTMLButtonElement).disabled;
+    }, timeoutMs);
+    if (!ready) return false;
+    this.first(CHATGPT_SELECTORS.sendButton)!.click();
+    return true;
+  }
+
+  async waitForAssistantMessage(afterCount: number, timeoutMs = 20000): Promise<AssistantReply | null> {
+    const ok = await this.waitFor(() => this.countAssistantMessages() > afterCount, timeoutMs);
+    return ok ? this.readLatestReply() : null;
+  }
+
+  private first(selectors: readonly string[]): HTMLElement | null {
+    for (const selector of selectors) {
+      const el = this.doc.querySelector<HTMLElement>(selector);
+      if (el) return el;
+    }
+    return null;
+  }
+
+  private all(selectors: readonly string[]): HTMLElement[] {
+    const out: HTMLElement[] = [];
+    for (const selector of selectors) out.push(...this.doc.querySelectorAll<HTMLElement>(selector));
+    return out;
+  }
+
+  private win(): Window & typeof globalThis {
+    return (this.doc.defaultView ?? window) as Window & typeof globalThis;
+  }
+
+  /** Resolves true once `test` holds (checked on DOM mutations), false after `timeoutMs`. */
+  private waitFor(test: () => boolean, timeoutMs: number): Promise<boolean> {
+    if (test()) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      const done = (value: boolean) => {
+        observer.disconnect();
+        clearTimeout(timer);
+        resolve(value);
+      };
+      const observer = new MutationObserver(() => {
+        if (test()) done(true);
+      });
+      observer.observe(this.doc.documentElement, { childList: true, subtree: true, attributes: true, characterData: true });
+      const timer = setTimeout(() => done(test()), timeoutMs);
+    });
+  }
+
   isVoiceModeActive(): boolean {
     return this.findOrb() !== null || this.findSessionControl() !== null;
   }
@@ -391,6 +621,17 @@ export class ChatGPTAdapter implements ConversationUiAdapter {
       else style.removeProperty('visibility');
     };
   }
+}
+
+/** The known voice named in `text` ("Sol", "Voice: sol"), else null. */
+function knownVoice(text: string): string | null {
+  const words = text.toLowerCase().split(/[^\p{L}]+/u);
+  return KNOWN_CHATGPT_VOICES.find((v) => words.includes(v.toLowerCase())) ?? null;
+}
+
+function isEditable(el: HTMLElement): boolean {
+  if ('disabled' in el && (el as HTMLTextAreaElement).disabled) return false;
+  return el.tagName === 'TEXTAREA' || el.isContentEditable || el.getAttribute('contenteditable') === 'true';
 }
 
 /** For containers only: a voice container marked aria-hidden is not the live one. */

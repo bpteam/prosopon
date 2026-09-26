@@ -12,6 +12,7 @@ import type { SceneHelpers } from '@avatar/renderer/AvatarStage';
 import type { DevTelemetry, EmotionStatus, MicStatus } from '../../shared/messages';
 import type { AvatarViewSettingsV1, DevWindowsSettingsV1 } from '../../shared/settings';
 import type { UiLayer } from '../shared/UiLayer';
+import type { CalibrationHost } from '../../calibration/types';
 
 /** One diagnostics sample (taken at 10 Hz while Developer Mode is on). Plain numbers, no live references. */
 export interface DevSample {
@@ -137,6 +138,9 @@ export interface DevBridge {
 
   /** Ask the offscreen document for telemetry (only while Developer Mode is on). */
   setTelemetry(enabled: boolean): void;
+
+  /** Probes and controls for the calibration wizard (Developer Tools → Calibration). */
+  readonly calibration: CalibrationHost;
 }
 
 /** Semantic diagnostics: analyser and pacer counters, and the last analysed segments with their decisions. */

@@ -3,7 +3,7 @@ import type { Avatar, BoneRotation, HumanBoneName, ProceduralPose } from './Avat
 import { CLOSED_MOUTH, type MouthSource } from './MouthShape';
 import { AvatarIdleController } from './AvatarIdleController';
 import type { AvatarState, AvatarStateProfile } from './AvatarStateProfiles';
-import { BehaviorMixer, type EmotionMixConfig, type EmotionMixState } from './BehaviorMixer';
+import { BehaviorMixer, type EmotionMixConfig, type EmotionMixState, type PoseAttribution } from './BehaviorMixer';
 import { NEUTRAL_EMOTION_INPUTS, type EmotionInputs, type EmotionSource } from './EmotionExpression';
 import { ConversationStateMachine, type ConversationStateMachineOptions } from './ConversationStateMachine';
 import { NEUTRAL_REACTION, type ReactionSource } from './UserReaction';
@@ -261,6 +261,21 @@ export class AvatarController implements AvatarControllerApi {
   /** Composed procedural pose of the last frame, also without an avatar (diagnostics, tests). */
   get pose(): Readonly<ProceduralPose> {
     return this.mixer.pose;
+  }
+
+  /** Per-source attribution of the head/body channels (calibration); costs nothing while off. */
+  setAttributionEnabled(on: boolean): void {
+    this.mixer.setAttributionEnabled(on);
+  }
+
+  /** Attribution of the last frame, null while disabled. Mutated in place: copy what you keep. */
+  get attribution(): Readonly<PoseAttribution> | null {
+    return this.mixer.attribution;
+  }
+
+  /** User reaction of the last frame (diagnostics). */
+  get reaction(): Readonly<UserReactionFrame> {
+    return this.lastReaction;
   }
 
   /**

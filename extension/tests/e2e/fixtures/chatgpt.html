@@ -21,12 +21,59 @@
     <!-- Mimics the parts of chatgpt.com that ChatGPTAdapter knows; see CHATGPT_SELECTORS. -->
     <div id="app">
       <div id="thread" data-chatgpt-conversation-selection-target="true"><p>Fixture conversation</p></div>
-      <form id="composer"><textarea aria-label="Message"></textarea><button type="button" id="open-voice">Voice</button></form>
+      <!-- Calibration automation (unverified against production, see docs/calibration-wizard.md). -->
+      <button type="button" data-testid="create-new-chat-button" id="new-chat">New chat</button>
+      <form id="composer">
+        <textarea id="prompt-textarea" aria-label="Message"></textarea>
+        <button type="button" data-testid="send-button" id="send" disabled>Send</button>
+        <button type="button" data-testid="composer-speech-button" aria-label="Start voice mode" id="open-voice">Voice</button>
+      </form>
     </div>
     <script>
       const app = document.getElementById('app');
+      const composer = document.getElementById('prompt-textarea');
+      const send = document.getElementById('send');
+      composer.addEventListener('input', () => (send.disabled = composer.value.trim() === ''));
+      send.addEventListener('click', () => {
+        const text = composer.value;
+        composer.value = '';
+        send.disabled = true;
+        void window.fixture.onSend(text);
+      });
+      document.getElementById('open-voice').addEventListener('click', () => window.fixture.openVoice());
+      document.getElementById('new-chat').addEventListener('click', () => {
+        document.querySelectorAll('[data-message-author-role]').forEach((m) => m.remove());
+      });
       let speech = null;
       window.fixture = {
+        voice: 'Sol',
+        muted: false,
+        /** Messages the composer sent (calibration E2E). */
+        sent: [],
+        /** Speech rate of the fake voice, characters per second. */
+        charsPerSecond: 16,
+        /**
+         * A typed message: shows it, then answers. The calibration prompts end with the text to say in quotes; the
+         * fixture "says" it (streams it as the reply and, in a voice session, plays speech for its length).
+         */
+        async onSend(text) {
+          this.sent.push(text);
+          const user = document.createElement('div');
+          user.dataset.messageAuthorRole = 'user';
+          user.dataset.messageId = `u${this.sent.length}`;
+          user.textContent = text;
+          document.getElementById('thread').append(user);
+          const quoted = /"([\s\S]*)"\s*$/.exec(text)?.[1] ?? 'Ready.';
+          await new Promise((r) => setTimeout(r, 300));
+          const voice = !!document.querySelector('[data-thread-focus-mode]');
+          if (voice) this.playSpeech();
+          const seconds = quoted.length / this.charsPerSecond;
+          await this.streamReply(`a${this.sent.length}`, [quoted], (seconds * 1000) / Math.max(1, quoted.split(/\s+/).length));
+          if (voice) {
+            await new Promise((r) => setTimeout(r, 200));
+            this.stopSpeech();
+          }
+        },
         // Mirrors production chatgpt.com (2026-09-26): a decorative aria-hidden orb inside its button, inside
         // the focus-mode container, plus the End Voice control. React unmounts all of it when voice ends.
         openVoice() {
@@ -47,7 +94,17 @@
           close.setAttribute('aria-label', 'End Voice');
           close.textContent = 'End';
           close.onclick = () => window.fixture.closeVoice();
-          container.append(button, close);
+          const mute = document.createElement('button');
+          mute.type = 'button';
+          mute.id = 'mute-voice';
+          mute.setAttribute('aria-label', 'Mute microphone');
+          mute.onclick = () => {
+            window.fixture.muted = !window.fixture.muted;
+            mute.setAttribute('aria-label', window.fixture.muted ? 'Unmute microphone' : 'Mute microphone');
+          };
+          const voiceName = document.createElement('span');
+          voiceName.setAttribute('aria-label', `Voice: ${window.fixture.voice}`);
+          container.append(button, close, mute, voiceName);
           app.append(container);
         },
         closeVoice() {

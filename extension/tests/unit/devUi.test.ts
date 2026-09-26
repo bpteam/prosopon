@@ -20,6 +20,7 @@ import { NEUTRAL_POSE_OFFSETS, type DevBridge, type DevSample, type DevToolsHand
 import { DevTools } from '../../src/ui/dev/DevTools';
 import { ManualControls } from '../../src/ui/dev/ManualControls';
 import { PlacementHandle } from '../../src/ui/placement/PlacementHandle';
+import { createWorld } from './calibrationFakes';
 
 function pointer(type: string, x: number, y: number): PointerEvent {
   return new PointerEvent(type, { clientX: x, clientY: y, button: 0, pointerId: 1, bubbles: true });
@@ -150,6 +151,7 @@ function fakeBridge(doc: Document) {
     gestures: { types: GESTURE_TYPES, trigger: vi.fn(() => true), cancel: vi.fn(), setAuto: vi.fn(), setEnabled: vi.fn() },
     semantic: { setEnabled: vi.fn(), setPacing: vi.fn(), setProbabilityScale: vi.fn() },
     setTelemetry: (on) => void calls.telemetry.push(on),
+    calibration: createWorld().host,
   };
   return { bridge, layer, calls, get view() {
     return view;

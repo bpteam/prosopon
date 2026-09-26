@@ -115,4 +115,23 @@ describe('SemanticFeed', () => {
     expect(src.stop).toHaveBeenCalled();
     expect(f.enabled).toBe(false);
   });
+
+  it('an observer sees every analysed and released intent, and its exceptions never stop the feed', () => {
+    const { f, out, src } = feed();
+    const analyzed: string[] = [];
+    const released: string[] = [];
+    f.observer = {
+      analyzed: (i) => {
+        analyzed.push(i.segmentId);
+        throw new Error('observer bug');
+      },
+      released: (i) => void released.push(i.segmentId),
+    };
+    src.set({ id: 'r1', text: 'Да, это работает. Но есть нюанс.' });
+    for (let i = 0; i < 20; i++) tick(f);
+    expect(out.length).toBeGreaterThan(0);
+    expect(released).toEqual(out.map((i) => i.segmentId));
+    expect(analyzed).toEqual(expect.arrayContaining(released));
+    expect(f.status.error ?? null).toBeNull();
+  });
 });

@@ -25,8 +25,11 @@ import {
   type Panel,
 } from './panels';
 import { DEV_CSS, tabs, type Tabs } from './widgets';
+import { CALIBRATION_CSS, calibrationPanel, type CalibrationSlot } from './calibrationPanel';
+import { CalibrationRunner } from '../../calibration/CalibrationRunner';
+import { buildScenario } from '../../calibration/scenarios';
 
-const DEVTOOLS_TABS = ['Overview', 'Audio', 'Emotion', 'Behavior', 'Gestures', 'Semantic', 'Avatar', 'Settings'] as const;
+const DEVTOOLS_TABS = ['Overview', 'Audio', 'Emotion', 'Behavior', 'Gestures', 'Semantic', 'Calibration', 'Avatar', 'Settings'] as const;
 const AVATAR_TABS = ['Camera', 'Expressions', 'Poses', 'Gestures', 'Scene'] as const;
 const TITLES: Record<DevWindowId, string> = { hud: 'Prosopon Debug', devtools: 'Prosopon Developer Tools', avatarControls: 'Avatar Controls' };
 
@@ -56,11 +59,25 @@ export class DevTools implements DevToolsHandle {
   private last: DevSample | null = null;
   private readonly offView: () => void;
   private disposed = false;
+  /** The calibration wizard's run (created on Start, ticked every frame, discarded with Developer Mode). */
+  private calibrationRunner: CalibrationRunner | null = null;
+  readonly calibration: CalibrationSlot;
 
   constructor(private readonly bridge: DevBridge) {
+    const tools = this;
+    this.calibration = {
+      get runner() {
+        return tools.calibrationRunner;
+      },
+      create: () => {
+        this.calibrationRunner = new CalibrationRunner({ host: bridge.calibration, scenario: buildScenario(bridge.calibration.scenarioOptions) });
+        return this.calibrationRunner;
+      },
+    };
     const layer = bridge.layer;
     layer.addStyle('floating-window', FLOATING_WINDOW_CSS);
     layer.addStyle('dev', DEV_CSS);
+    layer.addStyle('calibration', CALIBRATION_CSS);
     this.toolbar = quickToolbar(bridge.doc, bridge);
     layer.root.append(this.toolbar.el);
     for (const id of ['hud', 'devtools', 'avatarControls'] as const) {
@@ -94,6 +111,8 @@ export class DevTools implements DevToolsHandle {
       this.sinceSample = Math.max(0, this.sinceSample - 1 / SAMPLE_HZ) % (1 / SAMPLE_HZ);
       this.sampleNow();
     }
+    // The calibration wizard runs on this clock too (its waits resolve on frames): no timers of its own.
+    this.calibrationRunner?.tick(delta);
     if (this.sinceDraw >= 1 / DRAW_HZ - 1e-6) {
       this.sinceDraw = Math.max(0, this.sinceDraw - 1 / DRAW_HZ) % (1 / DRAW_HZ);
       for (const w of this.windows.values()) this.visiblePanel(w)?.draw();
@@ -205,6 +224,9 @@ export class DevTools implements DevToolsHandle {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    // Leaving Developer Mode ends a calibration: its recordings are destroyed, not kept for later.
+    if (this.calibrationRunner && this.calibrationRunner.view.phase !== 'discarded') void this.calibrationRunner.discard();
+    this.calibrationRunner = null;
     this.offView();
     for (const w of this.windows.values()) w.win.dispose();
     this.windows.clear();
@@ -257,6 +279,8 @@ export class DevTools implements DevToolsHandle {
             return gesturePanel(doc, b, 'devtools');
           case 'Semantic':
             return semanticPanel(doc, b);
+          case 'Calibration':
+            return calibrationPanel(doc, b, this.calibration);
           case 'Avatar':
             return avatarTabPanel(doc, b, () => this.open('avatarControls'));
           default:

@@ -42,6 +42,7 @@ function start(): void {
         debug: import.meta.env.DEV,
         onError: reportError,
         sendToOffscreen: (payload) => lifecycle.send(payload),
+        sendToWorker: (payload) => chrome.runtime.sendMessage(message(payload)),
       });
     },
     connect(onMessage, onDisconnect) {

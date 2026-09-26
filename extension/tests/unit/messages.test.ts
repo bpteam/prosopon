@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { message, parseMessage, PROTOCOL_VERSION, type ExtensionPayload } from '../../src/shared/messages';
+import { CALIBRATION_FILE_CHUNK, message, parseMessage, PROTOCOL_VERSION, type ExtensionPayload } from '../../src/shared/messages';
 
 const frame = { active: true, volume: 0.4, visemes: { aa: 0.5, ih: 0, ou: 0.1, ee: 0, oh: 0 } };
 
@@ -146,5 +146,31 @@ describe('emotion messages (US-006)', () => {
       { type: 'debug:emotion-config', config: [1, 2] },
     ];
     for (const payload of bad) expect(parseMessage({ ...payload, v: PROTOCOL_VERSION }), JSON.stringify(payload)).toBeNull();
+  });
+
+  it('validates calibration messages: clip ids, bundle paths, zip names, chunk size', () => {
+    const ok: ExtensionPayload[] = [
+      { type: 'calibration:begin', requestId: 1 },
+      { type: 'calibration:record', requestId: 2, clipId: 'assistant/ru/ru.question.normal.retry1', channel: 'assistant', action: 'start' },
+      { type: 'calibration:file', requestId: 3, name: 'trace.jsonl', text: '{}', append: true },
+      { type: 'calibration:build', requestId: 4, fileName: 'prosopon-calibration-sol-2026-09-26.zip' },
+      { type: 'calibration:discard', requestId: 5 },
+      { type: 'calibration:reply', reply: { requestId: 5, ok: true } },
+      { type: 'calibration:open-export' },
+      { type: 'calibration:bundle' },
+    ];
+    for (const payload of ok) expect(parseMessage(message(payload)), payload.type).not.toBeNull();
+    const bad = [
+      { type: 'calibration:record', requestId: 1, clipId: '../x', channel: 'user', action: 'start' },
+      { type: 'calibration:record', requestId: 1, clipId: '/abs', channel: 'user', action: 'start' },
+      { type: 'calibration:record', requestId: 1, clipId: 'a/../b', channel: 'user', action: 'start' },
+      { type: 'calibration:record', requestId: 1, clipId: 'a', channel: 'both', action: 'start' },
+      { type: 'calibration:file', requestId: 1, name: '../x.json', text: '', append: false },
+      { type: 'calibration:file', requestId: 1, name: 'x.exe', text: '', append: false },
+      { type: 'calibration:file', requestId: 1, name: 'x.json', text: 'x'.repeat(CALIBRATION_FILE_CHUNK + 1), append: false },
+      { type: 'calibration:build', requestId: 1, fileName: 'a/b.zip' },
+      { type: 'calibration:begin', requestId: -1 },
+    ];
+    for (const payload of bad) expect(parseMessage({ ...payload, v: PROTOCOL_VERSION }), JSON.stringify(payload).slice(0, 120)).toBeNull();
   });
 });

@@ -278,6 +278,10 @@ chrome.runtime.onMessage.addListener((raw, sender, sendResponse) => {
     case 'capture:ended':
       void ready.then(() => sessions.captureEnded(msg.tabId, msg.reason));
       return;
+    case 'calibration:open-export':
+      // The calibration wizard built its bundle in the offscreen document; this page offers it for download.
+      void chrome.tabs.create({ url: chrome.runtime.getURL('calibration-export/index.html') }).catch(() => {});
+      return;
     case 'mic:granted': {
       // The permission page did its job: start the mic where it's wanted, and close the page.
       void ready.then(() => syncMic(false));

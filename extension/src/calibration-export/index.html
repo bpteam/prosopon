@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Prosopon · calibration bundle</title>
+    <style>
+      body { margin: 0; font: 15px/1.5 system-ui, sans-serif; color: #1d1d1f; background: #f6f6f7; }
+      main { max-width: 36rem; margin: 12vh auto; padding: 0 16px; }
+      h1 { font-size: 1.3rem; }
+      p { color: #444; }
+      .actions { display: flex; gap: 12px; margin-top: 20px; }
+      a.button, button { font: inherit; padding: 8px 16px; border-radius: 8px; border: 1px solid #bbb; background: #fff; color: inherit; cursor: pointer; text-decoration: none; }
+      a.button { background: #1d6ff2; border-color: #1d6ff2; color: #fff; }
+      [hidden] { display: none !important; }
+      @media (prefers-color-scheme: dark) {
+        body { color: #eee; background: #18181a; }
+        p { color: #bbb; }
+        button { background: #2a2a2d; border-color: #555; }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Calibration bundle</h1>
+      <p id="status">Looking for the bundle…</p>
+      <p>
+        It contains the recorded calibration audio, the telemetry and the reports. It was built on this device and is
+        not uploaded anywhere. Hand the ZIP to a coding agent with access to the Prosopon repository: its
+        <code>AGENT_TASK.md</code> says what to do.
+      </p>
+      <div class="actions">
+        <a class="button" id="download" hidden>Download ZIP</a>
+        <button type="button" id="discard" hidden>Discard recordings</button>
+      </div>
+    </main>
+    <script type="module" src="./export.ts"></script>
+  </body>
+</html>

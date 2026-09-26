@@ -270,7 +270,8 @@ format documented on `parseModelSpec` in `audio/emotion/EmotionModel.ts`). Proce
   per-state rates; emotion compression; nod rules) and `GESTURE_LIMITS`.
 - `GestureEngine`: one primary gesture at a time, `prepare → attack → hold → release`, randomised cooldown, Poisson
   rates per state scaled by the assistant's arousal/intonation while speaking, repeat penalty, priorities
-  (forced/debug > boundary > semantic > speaking emphasis > ambient). `head-shake` and `lean-in` have rate 0 in
+  (forced/debug > boundary > semantic > speaking emphasis > ambient); `currentPriority` tells which one started the
+  running gesture (`GESTURE_PRIORITY`, null when idle). `head-shake` and `lean-in` have rate 0 in
   every state: only semantic intents or `trigger()` start them. Cancel and interruption release in 150–200 ms. Hand
   emphasis is scheduled only while the assistant speaks, never while the user speaks.
 - Nods: after a finished user utterance (`utteranceEnds` from the reaction source); double nods key on user arousal
@@ -337,6 +338,12 @@ state to speaking without audio (the mouth stays closed).
 
 - `BehaviorMixer` clamps the gesture layer to `GESTURE_LIMITS`, adds it on top of idle/state/emotion, then clamps the
   procedural sum to `POSE_LIMITS`. Arms therefore return to the lowered rest, not the T-pose.
+- Attribution (diagnostics, off by default): `setAttributionEnabled(true)` makes each `compose()` fill
+  `attribution` (`PoseAttribution`) for `ATTRIBUTED_CHANNELS` (head yaw/pitch/roll, lean, body yaw/roll, shoulders):
+  `sources` `{idle, state, reaction, emotion, gesture}` whose `sum` is the pre-clamp value, `gestureRequested`
+  (before `GESTURE_LIMITS`) and `final` (after `POSE_LIMITS`); arms as `{final, gestureRequested}` magnitudes. The
+  multiplicative gains are split in order idle → reaction → emotion. `AvatarController.setAttributionEnabled` /
+  `attribution` / `reaction` expose it; the extension's calibration wizard is the only user.
 - Missing bones are skipped; no shoulder bones → shoulder shift becomes a chest roll.
 - Expression owners: visemes → lip sync, emotion presets → emotion layer, `blink` → idle, anything → manual/debug.
 - VRM `overrideMouth`/`overrideBlink: blend` on an emotion preset would scale visemes/blink by `1 − Σweights` in

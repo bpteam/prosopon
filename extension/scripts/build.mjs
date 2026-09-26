@@ -5,12 +5,14 @@
 //     script imports on activation.
 //  2. IIFE: the content script itself, kept tiny (no three.js) since it runs on every chatgpt.com page.
 //  3. ES, single file: the user-voice AudioWorklet module (worklets load one module by URL, without chunks).
+//  4. ES, single file: the calibration recorder AudioWorklet (Developer Mode wizard only).
 //
 //   node scripts/build.mjs [--mode development] [--watch]
 import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'vite';
+import { execFileSync } from 'node:child_process';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const avatarRoot = resolve(root, '../avatar');
@@ -28,6 +30,20 @@ const embedModel = process.env.PROSOPON_EMBED_MODEL === '1';
 // import.meta.env.DEV follows NODE_ENV, not --mode: development builds carry the diagnostics and the E2E hook.
 process.env.NODE_ENV = dev ? 'development' : 'production';
 
+/** Git commit of the sources being built ("unknown" outside a git checkout); dirty = uncommitted changes. */
+function buildInfo() {
+  const git = (...cmd) => execFileSync('git', cmd, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  let commit = 'unknown';
+  let dirty = null;
+  try {
+    commit = git('rev-parse', 'HEAD');
+    dirty = git('status', '--porcelain', '--untracked-files=no').length > 0;
+  } catch {
+    // Not a git checkout (a source archive): the bundle says so.
+  }
+  return { commit, dirty, mode, builtAt: new Date().toISOString() };
+}
+
 const shared = {
   configFile: false,
   mode,
@@ -37,7 +53,12 @@ const shared = {
     // Core sources live outside this package; make sure there is one copy of three.
     dedupe: ['three', '@pixiv/three-vrm'],
   },
-  define: { __PROSOPON_ML__: 'true', __PROSOPON_EMBED_MODEL__: JSON.stringify(embedModel) },
+  define: {
+    __PROSOPON_ML__: 'true',
+    __PROSOPON_EMBED_MODEL__: JSON.stringify(embedModel),
+    // Which code a calibration bundle was recorded with (Developer Mode → Calibration).
+    __PROSOPON_BUILD__: JSON.stringify(buildInfo()),
+  },
 };
 
 /**
@@ -87,6 +108,7 @@ await build({
         background: resolve(root, 'src/background/service-worker.ts'),
         offscreen: resolve(root, 'src/offscreen/index.html'),
         permission: resolve(root, 'src/permission/index.html'),
+        calibration: resolve(root, 'src/calibration-export/index.html'),
         popup: resolve(root, 'src/popup/index.html'),
         'avatar-runtime': resolve(root, 'src/content/avatar-runtime.ts'),
       },
@@ -133,6 +155,24 @@ await build({
       entry: resolve(avatarRoot, 'src/audio/user/UserVoiceWorklet.ts'),
       formats: ['es'],
       fileName: () => 'worklets/user-voice.js',
+    },
+  },
+});
+
+await build({
+  ...shared,
+  root,
+  publicDir: false,
+  build: {
+    outDir,
+    emptyOutDir: false,
+    watch,
+    minify: !dev,
+    sourcemap: dev ? 'inline' : false,
+    lib: {
+      entry: resolve(root, 'src/offscreen/CalibrationRecorderWorklet.ts'),
+      formats: ['es'],
+      fileName: () => 'worklets/calibration-recorder.js',
     },
   },
 });

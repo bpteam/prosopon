@@ -19,8 +19,11 @@ import {
   type ExtensionPayload,
   type MicInfo,
   type MicStatus,
+  type CalibrationReply,
 } from '../shared/messages';
 import { PCM_CHUNK_SECONDS, ProsodyChannel, attachFeatureWorklet } from './ProsodyChannel';
+import { CalibrationRecorder, type RecorderTap } from './CalibrationRecorder';
+import { DEFAULT_PROSODY_EMOTION_CONFIG } from '@avatar/audio/emotion/ProsodyEmotionAnalyzer';
 import { UserVoicePipeline } from './UserVoicePipeline';
 import { workerEmotionLoader } from './WorkerEmotionModel';
 
@@ -138,7 +141,10 @@ class CaptureSession {
         url('worklets/user-voice.js'),
         (node) => this.input.addTap(node),
         { frameRate: AUDIO_RUNTIME_CONFIG.userFrameRate, pcm: this.modelPcm },
-        (frame) => this.emotion.pushFeatures(frame),
+        (frame) => {
+          this.emotion.pushFeatures(frame);
+          if (calibration?.tabId === this.tabId) calibration.recorder.pushFeatures('assistant', frame);
+        },
         (samples, rate) => this.emotion.pushPcm(samples, rate),
       );
       if (this.disposed) detach();
@@ -157,6 +163,12 @@ class CaptureSession {
     await this.startEmotion();
   }
 
+  /** Where the calibration recorder listens to this tab's audio. */
+  readonly recorderTap: RecorderTap = {
+    context: () => (this.disposed ? null : this.input.context),
+    connect: (node) => this.input.addTap(node),
+  };
+
   addPort(port: chrome.runtime.Port): void {
     this.ports.add(port);
     port.onDisconnect.addListener(() => {
@@ -168,6 +180,11 @@ class CaptureSession {
       if (msg?.type !== 'dev:subscribe') return;
       if (msg.enabled) this.telemetryPorts.add(port);
       else this.telemetryPorts.delete(port);
+    });
+    port.onMessage.addListener((raw) => {
+      const msg = parseMessage(raw);
+      if (!msg || !msg.type.startsWith('calibration:')) return;
+      void handleCalibration(this, msg).then((reply) => this.send(port, { type: 'calibration:reply', reply }));
     });
     if (import.meta.env.DEV) {
       // Development only: lets a test drive the analyser (including turning it off) on a live capture.
@@ -188,6 +205,8 @@ class CaptureSession {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    // The tab's capture ends: so does its calibration (recordings and any built bundle are dropped).
+    if (calibration?.tabId === this.tabId) discardCalibration();
     if (this.timer !== null) clearInterval(this.timer);
     this.timer = null;
     this.detachFeatures?.();
@@ -249,6 +268,11 @@ class CaptureSession {
     };
   }
 
+  /** Live settings of this tab's assistant analysis, for the calibration snapshot. */
+  get analysisConfig(): Record<string, unknown> {
+    return { analyzer: this.host.status, lipSyncMode: this.lipSync.mode, prosody: { ...this.emotion.analyzer.config } };
+  }
+
   broadcast(payload: ExtensionPayload): void {
     if (this.ports.size === 0) return;
     for (const port of this.ports) this.send(port, payload);
@@ -264,6 +288,72 @@ class CaptureSession {
 }
 
 const sessions = new Map<number, CaptureSession>();
+
+// --- Calibration recording (Developer Mode wizard) ---------------------------------------------------------------
+
+/** The one calibration session: recordings of one tab's audio (and the mic), alive until discarded. */
+let calibration: { tabId: number; recorder: CalibrationRecorder } | null = null;
+
+const micTap: RecorderTap = { context: () => userVoice.context, connect: (node) => userVoice.tap(node) };
+
+type CalibrationRequest = Extract<ReturnType<typeof parseMessage> & object, { requestId: number }>;
+
+async function handleCalibration(session: CaptureSession, msg: NonNullable<ReturnType<typeof parseMessage>>): Promise<CalibrationReply> {
+  const requestId = (msg as CalibrationRequest).requestId ?? 0;
+  try {
+    switch (msg.type) {
+      case 'calibration:begin': {
+        calibration?.recorder.dispose();
+        calibration = {
+          tabId: session.tabId,
+          recorder: new CalibrationRecorder({ assistant: session.recorderTap, user: micTap }, url('worklets/calibration-recorder.js')),
+        };
+        return {
+          requestId,
+          ok: true,
+          data: {
+            assistantSampleRate: calibration.recorder.sampleRate('assistant'),
+            micSampleRate: calibration.recorder.sampleRate('user'),
+            audioRuntime: { ...AUDIO_RUNTIME_CONFIG },
+            assistantAnalysis: session.analysisConfig,
+            userProsody: { ...userEmotion.analyzer.config },
+            defaultProsody: { ...DEFAULT_PROSODY_EMOTION_CONFIG },
+            emotion: refreshEmotionStatus(),
+          },
+        };
+      }
+      case 'calibration:record': {
+        const recorder = ownRecorder(session);
+        const data = msg.action === 'start' ? await recorder.startClip(msg.clipId, msg.channel) : recorder.stopClip(msg.clipId);
+        return { requestId, ok: data !== null, data: data ? { ...data } : undefined, error: data ? undefined : 'unknown clip' };
+      }
+      case 'calibration:file':
+        ownRecorder(session).addFile(msg.name, msg.text, msg.append);
+        return { requestId, ok: true };
+      case 'calibration:build': {
+        const built = await ownRecorder(session).build(msg.fileName);
+        return { requestId, ok: true, data: { name: built.name, bytes: built.bytes } };
+      }
+      case 'calibration:discard':
+        discardCalibration();
+        return { requestId, ok: true };
+      default:
+        return { requestId, ok: false, error: `unexpected ${msg.type}` };
+    }
+  } catch (error) {
+    return { requestId, ok: false, error: describeError(error) };
+  }
+}
+
+function ownRecorder(session: CaptureSession): CalibrationRecorder {
+  if (!calibration || calibration.tabId !== session.tabId) throw new Error('no calibration session for this tab');
+  return calibration.recorder;
+}
+
+function discardCalibration(): void {
+  calibration?.recorder.dispose();
+  calibration = null;
+}
 
 function contextTelemetry(id: AudioContextTelemetry['id'], ctx: AudioContext): AudioContextTelemetry {
   const ms = (s: number | undefined) => (typeof s === 'number' && Number.isFinite(s) ? s * 1000 : null);
@@ -293,6 +383,7 @@ const userVoice = new UserVoicePipeline(
   (frame) => {
     broadcastAll({ type: 'user:frame', frame });
     userEmotion.pushFeatures(frame);
+    calibration?.recorder.pushFeatures('user', frame);
   },
   (status) => {
     if (status.state !== 'on') userEmotion.reset();
@@ -457,6 +548,14 @@ chrome.runtime.onMessage.addListener((raw, _sender, sendResponse) => {
       return true;
     case 'emotion:model-deactivate':
       deactivateEmotionModel();
+      sendResponse({ ok: true });
+      return;
+    // The export page: the finished bundle's blob URL (same origin), or null. Audio itself never crosses.
+    case 'calibration:bundle':
+      sendResponse(calibration?.recorder.built ?? null);
+      return;
+    case 'calibration:discard':
+      discardCalibration();
       sendResponse({ ok: true });
       return;
     default:

@@ -112,7 +112,8 @@ scene helpers. Available in production builds too (it is a user setting, not a d
   Audio, Emotion (per-channel switches), Behavior, Gestures (real `GestureEngine` types, Auto / Enabled / Cancel,
   manual triggers), Semantic (on/off, *Follow speech*, *Chance ×*; counters and pacer state; the last segments with
   their matches — marker, locale, tier, confidence — the aggregated cues and the decision: gesture or skip reason),
-  Avatar, Settings (turn Developer mode off, reset window layout, storage keys).
+  Calibration (the real-voice calibration wizard, [below](#calibration-wizard)), Avatar, Settings (turn Developer
+  mode off, reset window layout, storage keys).
 - **Avatar Controls** (460 × 620, right 20, top 100): Camera (presets, distance, target height, yaw, pitch, size,
   *Move avatar*, reset), Expressions (explicit preview that fades both emotion channels; `n/a` when the model lacks
   one), Poses (offsets over the rest pose, *Reset pose*), Gestures, Scene (transparent background; grid, skeleton,
@@ -129,6 +130,28 @@ Boundaries (`tests/unit/architecture.test.ts`): `src/ui/**` and `src/popup/**` i
 `AvatarController`, `BehaviorMixer`, `AvatarStage` or `RenderLoop` at runtime and never touch bones,
 `expressionManager` or `setState`; `ManualControls` is the only writer of the manual layer; the content loader
 never reaches `src/ui`. Escape closes the focused window; all windows are `role="dialog"` with labelled controls.
+
+### Calibration wizard
+
+Developer Tools → *Calibration*: Start → automatic scripted session with ChatGPT Voice → Export ZIP. Procedure,
+bundle contents and manual checks: [../docs/calibration-wizard.md](../docs/calibration-wizard.md).
+
+- `src/calibration/` (in the Dev UI chunk; imports no avatar runtime, renderer or DOM, architecture-tested):
+  `CalibrationRunner` (resumable phase machine driven by `FrameClock`, ticked from `DevToolsHandle.frame`),
+  `scenarios.ts` (languages × categories, expectations checked against the real `SemanticAnalyzer` in unit tests),
+  `CalibrationTrace` (15 Hz trace + events), `analysis.ts` (verdicts), `reports.ts` (`REPORT.md`, `AGENT_TASK.md`),
+  `zip.ts` / `wav.ts`. It sees the page only through `CalibrationHost` (`DevBridge.calibration`, implemented in
+  `avatar-runtime.ts`): probes, the `ConversationAutomation` part of `ChatGPTAdapter`, and offscreen requests.
+- Offscreen: `CalibrationRecorder` taps the tab capture (`AudioInput.addTap`) and the mic (`UserVoicePipeline.tap`,
+  same edge check) into a 0-output recorder worklet (`worklets/calibration-recorder.js`), keeps Int16 clips and
+  feature frames in memory (≤ 120 s per clip), and on `calibration:build` packs the ZIP and exposes it as a
+  `blob:` URL. The export page (`calibration-export/index.html`, opened by the service worker) asks for that URL
+  with `calibration:bundle` and downloads it; no `downloads` permission.
+- Messages (content → offscreen over `LIPSYNC_PORT`, each answered by `calibration:reply`): `calibration:begin`,
+  `calibration:record` (`clipId` like `assistant/ru/ru.question.normal`, validated as a relative path),
+  `calibration:file` (text files in ≤ 4 MB chunks), `calibration:build`, `calibration:discard`; content → service
+  worker `calibration:open-export`; export page → offscreen `calibration:bundle` / `calibration:discard`.
+- Build info: `scripts/build.mjs` defines `__PROSOPON_BUILD__` (git commit, dirty flag, mode, time) for the manifest.
 
 ## Architecture
 
@@ -165,8 +188,9 @@ The service worker, offscreen, content, worklet, `ui/` and `popup/` boundaries a
 
 - **Reuse, not copies.** All avatar/audio code is imported from `avatar/src` (`@avatar/*`). Cross-context contracts
   live in the core too: `LipSyncFrame`, `FrameMouthSource`, `MouthShape`, `UserVoiceFrame`, `EmotionFrame`.
-- **Build.** `scripts/build.mjs` runs three Vite builds: ES (service worker, offscreen, permission page, popup, avatar
-  runtime), IIFE (the content script), and a single-file ES worklet (`worklets/user-voice.js`). It copies
+- **Build.** `scripts/build.mjs` runs four Vite builds: ES (service worker, offscreen, permission page, popup,
+  calibration export page, avatar runtime), IIFE (the content script), and two single-file ES worklets
+  (`worklets/user-voice.js`, `worklets/calibration-recorder.js`). It copies
   `avatar/public/` (VRM, lip-sync assets), the wLipSync worklet/WASM and ONNX Runtime's
   `ort-wasm-simd-threaded.jsep.wasm` into `dist/`. `import.meta.env.DEV` follows `NODE_ENV`, which the script sets
   from `--mode`.
@@ -295,7 +319,8 @@ IndexedDB. The `PROSOPON_EMBED_MODEL=1 …` script syntax needs a POSIX shell (u
   DevTools console's context selector.
 - Page-console events: `prosopon:debug` (e.g. `{ emotionConfig: { baselineWeight: 0.3 } }`) and `prosopon:gesture`
   (`trigger`, `cancel`, `auto`, `seed`, `config`), `prosopon:emotion` (`{channel, enabled}`), `prosopon:semantic`
-  (`{enabled, pacing, probabilityScale}`).
+  (`{enabled, pacing, probabilityScale}`), `prosopon:calibration` (`{languages, categories, user}`: a smaller
+  scenario for the next calibration Start).
 - Semantic attributes on the overlay host: `data-semantic-enabled`, `data-semantic-mode` (`speech` / `immediate` /
   `off`), `data-semantic-cues`, `data-semantic-intents`, `data-semantic-accepted`, `data-semantic-last` (cue types of
   the last intent). `__PROSOPON_DEBUG__.semantic` is the `SemanticFeed`; `__PROSOPON_DEBUG__.chatgpt` is a
@@ -303,7 +328,8 @@ IndexedDB. The `PROSOPON_EMBED_MODEL=1 …` script syntax needs a POSIX shell (u
   observer state) for selector-drift diagnosis.
 - Calibration procedures: [../docs/emotion-calibration.md](../docs/emotion-calibration.md) (prosody/emotion),
   [../docs/gesture-calibration.md](../docs/gesture-calibration.md) (gestures),
-  [../docs/semantic-calibration.md](../docs/semantic-calibration.md) (reply text, timing, semantic accents).
+  [../docs/semantic-calibration.md](../docs/semantic-calibration.md) (reply text, timing, semantic accents),
+  [../docs/calibration-wizard.md](../docs/calibration-wizard.md) (automatic real-voice calibration run).
 
 ## Known limitations
 
@@ -342,6 +368,9 @@ IndexedDB. The `PROSOPON_EMBED_MODEL=1 …` script syntax needs a POSIX shell (u
 - **Semantic layer.** The assistant-message selector and the reply text in voice mode are unverified on production
   (fixture only); if ChatGPT doesn't render the reply while it speaks, semantic accents are silent in voice mode.
   Timing is a fixed-rate estimate, not alignment. See [../docs/semantic-calibration.md](../docs/semantic-calibration.md).
+- **Calibration wizard automation** (`ConversationAutomation` in `ChatGPTAdapter`): typing into the composer during
+  a voice session, the send/new-chat/voice/mute selectors and voice-name detection are guesses tested on the fixture
+  only. See [../docs/calibration-wizard.md](../docs/calibration-wizard.md#manual-checks-on-real-chatgptcom).
 - **VRM expression overrides.** Presets with `overrideMouth: blend` are pre-compensated; a model whose emotion
   presets `block` the mouth gets no procedural emotion on them (warned once).
 
@@ -352,7 +381,8 @@ npm test          # unit: protocol, manifest, TabSessions/ContentLifecycle idemp
                   # reply text), SemanticFeed (baseline, streaming, pacing, fail-soft),
                   # ConversationSignalResolver, UserVoicePipeline (fake Web Audio graph), architecture rules,
                   # settings (schema, roundtrip, debounce, clamp), ring buffer, Dev UI (happy-dom: windows, Dev Mode
-                  # switch, toolbar, placement handle, ManualControls)
+                  # switch, toolbar, placement handle, ManualControls), calibration (runner on a simulated
+                  # ChatGPT, scenarios vs SemanticAnalyzer, ZIP/WAV, recorder + worklet, adapter automation)
 npm run test:e2e  # builds dist/ in development mode, then Playwright with the unpacked extension
 ```
 
@@ -372,6 +402,9 @@ Playwright's default `--mute-audio` is removed so the captured audio isn't silen
   avatar keeps running).
 - `semantic.spec.ts`: a reply streamed into the fixture (`fixture.streamReply`) → cues and intents on the overlay
   host; the reply present at activation is ignored; `prosopon:semantic` off stops analysis.
+- `calibration.spec.ts`: the wizard end to end on the fixture (reduced by `prosopon:calibration`): Start → setup
+  prompt and samples typed through the composer → the fixture speaks them (real tab audio) → analysis → Export →
+  the export page downloads the ZIP, whose manifest, trace, text, WAVs and agent task are checked; Discard.
 - `emotion.spec.ts`: assistant and user channels through to the mixer, interruption priority swap, the Dev Tools
   emotion switch; local-model WASM and failure paths use the `avatar/tests/fixtures/loudness-probe.onnx` plumbing
   fixture. The extension does not enable WebGPU in its offscreen audio process.
