@@ -4,6 +4,8 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
+    // inotify doesn't cross some bind mounts (Docker Desktop on Windows, network FS); see compose.yaml.
+    watch: process.env.WATCH_POLLING === 'true' ? { usePolling: true, interval: 300 } : undefined,
   },
   build: {
     // three + three-vrm are ~800 kB minified; splitting them buys nothing for a single-page sandbox.
