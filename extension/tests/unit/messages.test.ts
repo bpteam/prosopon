@@ -61,7 +61,7 @@ describe('debug:analyzer', () => {
 });
 
 describe('user voice messages (US-005)', () => {
-  const frame = { speaking: true, segmentDuration: 0.4, rmsDb: -30, noiseFloorDb: -60, energy: 0.5, pitchHz: 180, pitchConfidence: 0.9, relativePitch: 1.5, pitchVariation: 0.8 };
+  const frame = { speaking: true, segmentDuration: 0.4, rmsDb: -30, noiseFloorDb: -60, energy: 0.5, pitchHz: 180, pitchConfidence: 0.9, relativePitch: 1.5, pitchVariation: 0.8, spectralCentroid: 1200, spectralRolloff: 2600, zeroCrossingRate: 0.06 };
 
   it('accepts a UserVoiceFrame and mic statuses', () => {
     expect(parseMessage(message({ type: 'user:frame', frame }))).not.toBeNull();
@@ -86,5 +86,44 @@ describe('user voice messages (US-005)', () => {
 
   it('a frame serialises to plain JSON of the same shape (nothing lost or hidden in transport)', () => {
     expect(JSON.parse(JSON.stringify(frame))).toEqual(frame);
+  });
+});
+
+describe('emotion messages (US-006)', () => {
+  const frame = {
+    active: true,
+    valence: 0.1,
+    arousal: 0.6,
+    energy: 0.5,
+    tension: 0.2,
+    pitchLift: -0.3,
+    pitchVariation: 0.4,
+    confidence: 0.5,
+    valenceConfidence: 0.2,
+    speechRate: 0.5,
+    mode: 'heuristic',
+  };
+
+  it('accepts EmotionFrames per channel and statuses', () => {
+    expect(parseMessage(message({ type: 'emotion:frame', channel: 'user', frame } as ExtensionPayload))).not.toBeNull();
+    expect(parseMessage(message({ type: 'emotion:frame', channel: 'assistant', frame } as ExtensionPayload))).not.toBeNull();
+    expect(parseMessage(message({ type: 'emotion:status', status: { model: 'failed', mode: 'fallback', inferences: 0, error: 'x' } }))).not.toBeNull();
+    expect(parseMessage(message({ type: 'debug:emotion-config', config: { baselineWeight: 0.2 } }))).not.toBeNull();
+  });
+
+  it('rejects unknown channels, out-of-range values, audio payloads and odd config', () => {
+    const bad = [
+      { type: 'emotion:frame', channel: 'both', frame },
+      { type: 'emotion:frame', channel: 'user', frame: { ...frame, arousal: 2 } },
+      { type: 'emotion:frame', channel: 'user', frame: { ...frame, valence: NaN } },
+      { type: 'emotion:frame', channel: 'user', frame: { ...frame, samples: new Float32Array(4) } },
+      { type: 'emotion:frame', channel: 'user', frame: { ...frame, mode: 'gpt' } },
+      { type: 'emotion:status', status: { model: 'on', mode: 'heuristic', inferences: 0 } },
+      { type: 'emotion:status', status: { model: 'ready', mode: 'ml-wasm', inferences: -1 } },
+      { type: 'debug:emotion-config', config: { baselineWeight: 'x' } },
+      { type: 'debug:emotion-config', config: { '__proto__.x': 1 } },
+      { type: 'debug:emotion-config', config: [1, 2] },
+    ];
+    for (const payload of bad) expect(parseMessage({ ...payload, v: PROTOCOL_VERSION }), JSON.stringify(payload)).toBeNull();
   });
 });

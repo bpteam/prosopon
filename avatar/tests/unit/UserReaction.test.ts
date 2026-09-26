@@ -1,3 +1,4 @@
+import { NO_EMOTION_EXPRESSIONS } from '../../src/avatar/EmotionExpression';
 import { describe, expect, it } from 'vitest';
 import { SILENT_USER_VOICE_FRAME, type UserVoiceFrame } from '../../src/audio/user/UserVoiceFrame';
 import { Avatar } from '../../src/avatar/Avatar';
@@ -91,7 +92,7 @@ describe('UserReactionMapper', () => {
 });
 
 describe('BehaviorMixer reaction input', () => {
-  const idlePose = { headYaw: 0.02, headPitch: 0.01, headRoll: -0.01, breath: 0.5, lean: 0, blink: 0, gazeYaw: 4, gazePitch: 2, aa: 0, ih: 0, ou: 0, ee: 0, oh: 0 };
+  const idlePose = { ...NO_EMOTION_EXPRESSIONS, headYaw: 0.02, headPitch: 0.01, headRoll: -0.01, breath: 0.5, lean: 0, blink: 0, gazeYaw: 4, gazePitch: 2, aa: 0, ih: 0, ou: 0, ee: 0, oh: 0 };
 
   it('neutral reaction is the identity', () => {
     const mixer = new BehaviorMixer();

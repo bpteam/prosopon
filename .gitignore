@@ -1,2 +1,4 @@
 .idea
 dev-profile/
+# US-006: a local emotion model is dropped in by the user (licence, size); never committed.
+avatar/public/emotion-model/

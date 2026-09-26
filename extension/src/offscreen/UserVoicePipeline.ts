@@ -33,6 +33,12 @@ export interface UserVoicePipelineDeps {
   /** URL of the built UserVoiceWorklet module. */
   workletUrl: string;
   frameRate: number;
+  /**
+   * Also receive the decimated audio in chunks of this many seconds (a local emotion model is configured). Read at
+   * each start(); undefined: the worklet posts frames only.
+   */
+  pcmChunkSeconds?: () => number | undefined;
+  onPcm?(samples: Float32Array, sampleRate: number): void;
   /** AudioWorkletNode constructor; injected by tests. */
   createNode?(ctx: AudioContext, name: string, options: AudioWorkletNodeOptions): AudioWorkletNode;
 }
@@ -105,10 +111,17 @@ export class UserVoicePipeline {
         numberOfOutputs: 0,
         channelCount: 1,
         channelCountMode: 'explicit',
-        processorOptions: { frameRate: this.deps.frameRate } satisfies UserVoiceProcessorOptions,
+        processorOptions: {
+          frameRate: this.deps.frameRate,
+          pcmChunkSeconds: this.deps.pcmChunkSeconds?.(),
+        } satisfies UserVoiceProcessorOptions,
       });
       node.port.onmessage = (event: MessageEvent<UserVoiceWorkletMessage>) => {
-        if (this.graph === graph && event.data?.type === 'frame') this.onFrame(event.data.frame);
+        if (this.graph !== graph) return;
+        const msg = event.data;
+        if (msg?.type === 'frame') this.onFrame(msg.frame);
+        // Samples go to the in-document model only; they are never forwarded or stored.
+        else if (msg?.type === 'pcm') this.deps.onPcm?.(msg.samples, msg.sampleRate);
       };
       graph.node = node;
       graph.source = graph.ctx.createMediaStreamSource(stream);

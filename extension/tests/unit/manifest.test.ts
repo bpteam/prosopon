@@ -41,3 +41,17 @@ describe('microphone reactions (US-005)', () => {
     expect(serviceWorker).not.toMatch(/chrome\.storage\.local|chrome\.storage\.sync/);
   });
 });
+
+describe('local emotion model (US-006)', () => {
+  const csp = (manifest as unknown as { content_security_policy?: { extension_pages?: string } }).content_security_policy;
+
+  it("allows WebAssembly compilation on extension pages ('wasm-unsafe-eval') and nothing looser", () => {
+    // Without it ONNX Runtime fails in the offscreen document: "Refused to compile or instantiate WebAssembly".
+    expect(csp?.extension_pages).toMatch(/script-src 'self' 'wasm-unsafe-eval'/);
+    expect(csp?.extension_pages).not.toMatch(/'unsafe-eval'|'unsafe-inline'|https?:|\*/);
+  });
+
+  it('asks for no new permissions: the model is a packaged file, never fetched from the network', () => {
+    expect(manifest.permissions).toEqual(['tabCapture', 'offscreen', 'scripting', 'contextMenus', 'storage']);
+  });
+});

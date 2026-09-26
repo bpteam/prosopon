@@ -28,7 +28,14 @@ export const DEFAULT_EXPRESSIONS = [
 ];
 
 /** Minimal structural stand-in for @pixiv/three-vrm's VRM. */
-export function createFakeVrm(options: { expressions?: string[]; bones?: HumanBoneName[] } = {}): FakeVrm {
+export function createFakeVrm(
+  options: {
+    expressions?: string[];
+    bones?: HumanBoneName[];
+    /** VRM 1.0 override flags per expression, e.g. { happy: { overrideMouth: 'blend' } }. */
+    overrides?: Record<string, { overrideMouth?: string; overrideBlink?: string }>;
+  } = {},
+): FakeVrm {
   const scene = new THREE.Group();
   const bones = new Map<HumanBoneName, THREE.Object3D>();
   let parent: THREE.Object3D = scene;
@@ -42,7 +49,10 @@ export function createFakeVrm(options: { expressions?: string[]; bones?: HumanBo
   }
 
   const values = new Map<string, number>();
-  const expressions = (options.expressions ?? DEFAULT_EXPRESSIONS).map((expressionName) => ({ expressionName }));
+  const expressions = (options.expressions ?? DEFAULT_EXPRESSIONS).map((expressionName) => ({
+    expressionName,
+    ...options.overrides?.[expressionName],
+  }));
 
   const fake: FakeVrm = {
     scene,

@@ -68,10 +68,17 @@ function start(): void {
 
   // Development only: a page-world hook for driving the audio runtime from an integration test on the real site.
   //   document.dispatchEvent(new CustomEvent('prosopon:debug', { detail: { analyzer: 'none' } }))
+  //   document.dispatchEvent(new CustomEvent('prosopon:debug', { detail: { emotionConfig: { baselineWeight: 0.3 } } }))
   const onDebugEvent = (event: Event) => {
-    const choice = (event as CustomEvent<{ analyzer?: unknown }>).detail?.analyzer;
+    const detail = (event as CustomEvent<{ analyzer?: unknown; emotionConfig?: unknown }>).detail;
+    const choice = detail?.analyzer;
     if (choice === 'headaudio' || choice === 'wlipsync' || choice === 'none') {
       lifecycle.send({ type: 'debug:analyzer', choice });
+    }
+    const config = detail?.emotionConfig;
+    if (config && typeof config === 'object') {
+      // Validated again by the offscreen document (parseMessage): numbers only.
+      lifecycle.send({ type: 'debug:emotion-config', config: config as Record<string, number> });
     }
   };
   if (import.meta.env.DEV) document.addEventListener('prosopon:debug', onDebugEvent);

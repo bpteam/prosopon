@@ -1,7 +1,8 @@
 /**
  * Conversation states and how each one shapes the procedural (idle) pose.
  *
- * Conversation state is not emotion: no profile touches expressions. An emotion layer is a separate source.
+ * Conversation state is not emotion: no profile touches expressions. The emotion layer is a separate source; a
+ * profile only says how much each voice channel's emotion may shape the avatar in that state (priority rules).
  */
 export const AVATAR_STATES = ['idle', 'listening', 'thinking', 'speaking'] as const;
 
@@ -31,6 +32,11 @@ export interface AvatarStateProfile {
 
   /** Upper-body forward lean, radians. */
   leanOffset: number;
+
+  /** Weight of the assistant's voice emotion on the avatar's self-expression in this state, [0, 1]. */
+  assistantEmotionWeight: number;
+  /** Weight of the user's voice emotion on the reaction layer in this state, [0, 1]. */
+  userEmotionWeight: number;
 }
 
 export const PROFILE_KEYS = [
@@ -43,6 +49,8 @@ export const PROFILE_KEYS = [
   'gazeYawOffset',
   'gazePitchOffset',
   'leanOffset',
+  'assistantEmotionWeight',
+  'userEmotionWeight',
 ] as const satisfies readonly (keyof AvatarStateProfile)[];
 
 const NEUTRAL: AvatarStateProfile = {
@@ -55,6 +63,8 @@ const NEUTRAL: AvatarStateProfile = {
   gazeYawOffset: 0,
   gazePitchOffset: 0,
   leanOffset: 0,
+  assistantEmotionWeight: 0,
+  userEmotionWeight: 0,
 };
 
 function profile(overrides: Partial<AvatarStateProfile>): Readonly<AvatarStateProfile> {
@@ -75,6 +85,10 @@ export const STATE_PROFILES: Readonly<Record<AvatarState, Readonly<AvatarStatePr
     headPitchOffset: 0.025,
     headRollOffset: 0.02,
     leanOffset: 0.02,
+    // The user has the floor (also when they interrupt): their voice drives the reaction layer; what's left of the
+    // assistant's expression fades to a trace.
+    userEmotionWeight: 1,
+    assistantEmotionWeight: 0.15,
   }),
 
   // Inward: small tilt, gaze slightly aside and down, less movement overall.
@@ -87,6 +101,8 @@ export const STATE_PROFILES: Readonly<Record<AvatarState, Readonly<AvatarStatePr
     gazeYawOffset: -7,
     gazePitchOffset: -2.5,
     breathingMultiplier: 0.9,
+    userEmotionWeight: 0.4,
+    assistantEmotionWeight: 0.2,
   }),
 
   // Engaged: mostly eye contact, a bit livelier head and posture.
@@ -96,6 +112,9 @@ export const STATE_PROFILES: Readonly<Record<AvatarState, Readonly<AvatarStatePr
     breathingMultiplier: 1.1,
     headPitchOffset: -0.01,
     leanOffset: 0.03,
+    // The assistant owns self-expression. The user's mic while the assistant talks is mostly echo: no reaction.
+    assistantEmotionWeight: 1,
+    userEmotionWeight: 0,
   }),
 });
 

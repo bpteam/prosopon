@@ -23,6 +23,12 @@ const SHADOW_CSS = `
 :host { all: initial; }
 .stage { position: absolute; inset: 0; }
 .stage canvas { display: block; width: 100%; height: 100%; background: transparent; }
+.toggles {
+  position: absolute; right: 0; top: 0; margin: 0; padding: 3px 5px; pointer-events: auto;
+  font: 10px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: #d8f5d0; background: rgba(0, 0, 0, 0.72);
+  border-radius: 4px; display: flex; flex-direction: column;
+}
+.toggles label { cursor: pointer; white-space: nowrap; }
 .debug {
   position: absolute; left: 0; top: 0; margin: 0; padding: 4px 6px; max-width: 100%; overflow: hidden;
   font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre;
@@ -42,6 +48,7 @@ export class AvatarOverlay {
   readonly stageContainer: HTMLDivElement;
   private readonly shadow: ShadowRoot;
   private readonly debugEl: HTMLPreElement | null;
+  private togglesEl: HTMLDivElement | null = null;
   private anchor: HTMLElement | null = null;
   private readonly resizeObserver: ResizeObserver;
   private placementValue: OverlayPlacement = 'fallback';
@@ -89,6 +96,28 @@ export class AvatarOverlay {
     this.anchor = element;
     if (element) this.resizeObserver.observe(element);
     this.place();
+  }
+
+  /**
+   * Debug builds: a checkbox that stays clickable (the rest of the overlay lets clicks through to the page).
+   * @returns the input, for syncing its state
+   */
+  addDebugToggle(id: string, label: string, checked: boolean, onChange: (checked: boolean) => void): HTMLInputElement | null {
+    if (!this.debugEl) return null;
+    if (!this.togglesEl) {
+      this.togglesEl = this.doc.createElement('div');
+      this.togglesEl.className = 'toggles';
+      this.shadow.append(this.togglesEl);
+    }
+    const row = this.doc.createElement('label');
+    const input = this.doc.createElement('input');
+    input.type = 'checkbox';
+    input.id = id;
+    input.checked = checked;
+    input.addEventListener('change', () => onChange(input.checked));
+    row.append(input, this.doc.createTextNode(` ${label}`));
+    this.togglesEl.append(row);
+    return input;
   }
 
   setDebugText(text: string): void {

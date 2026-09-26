@@ -1,5 +1,6 @@
 import { PitchBaseline, type PitchBaselineConfig } from './PitchBaseline';
 import { NO_PITCH, PitchDetector, type PitchConfig, type PitchEstimate } from './PitchDetector';
+import { NO_SPECTRUM, SpectralAnalyzer, type SpectralEstimate } from './SpectralFeatures';
 import type { UserVoiceFrame } from './UserVoiceFrame';
 import { VoiceActivityDetector, type VadConfig, type VoiceActivityState } from './VoiceActivityDetector';
 
@@ -31,8 +32,9 @@ export const DEFAULT_USER_VOICE_CONFIG: Readonly<UserVoiceAnalyzerConfig> = Obje
 });
 
 /**
- * Sample-level analysis of the user's microphone: fixed-hop RMS → VAD, decimated windows → MPM pitch → session
- * baseline → relative pitch/variation. Pure computation with no Web Audio, DOM or avatar dependency, so it runs in an
+ * Sample-level voice features of one channel (the user's microphone, or the assistant's tab audio): fixed-hop RMS →
+ * VAD, decimated windows → MPM pitch → session baseline → relative pitch/variation, plus spectral centroid/roll-off
+ * and zero-crossing rate. Pure computation with no Web Audio, DOM or avatar dependency, so it runs in an
  * AudioWorklet (the extension) and in unit tests alike. Samples live only in two short internal buffers
  * (one hop, one pitch window) and are overwritten as new audio arrives; nothing is kept or exposed.
  */
@@ -57,10 +59,18 @@ export class UserVoiceAnalyzer {
   private ringPos = 0;
   private ringFill = 0;
 
+  /** Optional copy of the decimated audio for a local model (off unless enablePcm() was called). */
+  private pcm: { chunk: Float32Array; fill: number; ready: Float32Array[] } | null = null;
+
   private time = 0;
   private levelDb = -100;
   private energy = 0;
   private estimate: PitchEstimate = NO_PITCH;
+  private readonly spectral = new SpectralAnalyzer(512);
+  private spectrum: SpectralEstimate = NO_SPECTRUM;
+  private prevSample = 0;
+  private hopCrossings = 0;
+  private zcr = 0;
   private reportedPitch: number | null = null;
   private relativePitch = 0;
   /** (analysis time, semitones re 1 Hz) of recent voiced estimates. */
@@ -92,10 +102,14 @@ export class UserVoiceAnalyzer {
     for (let i = 0; i < n; i++) {
       const s = samples[i]!;
       this.hopSum += s * s;
+      if ((s >= 0) !== (this.prevSample >= 0)) this.hopCrossings++;
+      this.prevSample = s;
       this.decimAcc += s;
       if (++this.decimFill === this.decimation) {
         // Box-filter decimation: crude, but speech F0 sits far below the new Nyquist.
-        this.ring[this.ringPos] = this.decimAcc / this.decimation;
+        const d = this.decimAcc / this.decimation;
+        this.ring[this.ringPos] = d;
+        if (this.pcm) this.collectPcm(d);
         this.ringPos = (this.ringPos + 1) % this.ring.length;
         if (this.ringFill < this.ring.length) this.ringFill++;
         this.decimAcc = 0;
@@ -103,6 +117,25 @@ export class UserVoiceAnalyzer {
       }
       if (++this.hopFill === this.hopSamples) this.endHop();
     }
+  }
+
+  /** Rate of the decimated audio (pitch analysis and PCM chunks), Hz. */
+  get decimatedRate(): number {
+    return this.pitchRate;
+  }
+
+  /**
+   * Keeps the decimated audio in chunks of `chunkSeconds` for a local emotion model; call takePcm() to drain them.
+   * Off by default: without a model no samples are collected at all. At most a few chunks are buffered.
+   */
+  enablePcm(chunkSeconds: number): void {
+    const size = Math.max(16, Math.round(this.pitchRate * chunkSeconds));
+    this.pcm = { chunk: new Float32Array(size), fill: 0, ready: [] };
+  }
+
+  /** The oldest completed PCM chunk, or null. */
+  takePcm(): Float32Array | null {
+    return this.pcm?.ready.shift() ?? null;
   }
 
   /** Current state as a fresh, serialisable frame. */
@@ -118,6 +151,9 @@ export class UserVoiceAnalyzer {
       pitchConfidence: round(this.estimate.confidence, 3),
       relativePitch: round(this.relativePitch, 2),
       pitchVariation: round(this.variation(), 2),
+      spectralCentroid: round(this.spectrum.centroidHz, 0),
+      spectralRolloff: round(this.spectrum.rolloffHz, 0),
+      zeroCrossingRate: round(this.zcr, 4),
     };
   }
 
@@ -132,16 +168,34 @@ export class UserVoiceAnalyzer {
     this.levelDb = -100;
     this.energy = 0;
     this.estimate = NO_PITCH;
+    this.spectrum = NO_SPECTRUM;
+    this.prevSample = 0;
+    this.hopCrossings = 0;
+    this.zcr = 0;
     this.reportedPitch = null;
     this.relativePitch = 0;
     this.voiced = [];
+    if (this.pcm) this.pcm = { chunk: new Float32Array(this.pcm.chunk.length), fill: 0, ready: [] };
+  }
+
+  private collectPcm(sample: number): void {
+    const pcm = this.pcm!;
+    pcm.chunk[pcm.fill++] = sample;
+    if (pcm.fill < pcm.chunk.length) return;
+    // Nobody draining: drop the oldest rather than grow.
+    if (pcm.ready.length >= MAX_PCM_CHUNKS) pcm.ready.shift();
+    pcm.ready.push(pcm.chunk);
+    pcm.chunk = new Float32Array(pcm.chunk.length);
+    pcm.fill = 0;
   }
 
   private endHop(): void {
     const c = this.config;
     const dt = this.hopSamples / this.sampleRate;
     const rms = Math.sqrt(this.hopSum / this.hopSamples);
+    const crossings = this.hopCrossings / this.hopSamples;
     this.hopSum = 0;
+    this.hopCrossings = 0;
     this.hopFill = 0;
     this.time += dt;
     this.levelDb = rms > 1e-5 ? 20 * Math.log10(rms) : -100;
@@ -151,6 +205,8 @@ export class UserVoiceAnalyzer {
     const target = activity.speaking ? clamp01((this.levelDb - gate) / c.energyRangeDb) : 0;
     this.energy += (target - this.energy) * (1 - Math.exp(-dt / c.energySmoothing));
     if (this.energy < 1e-4) this.energy = 0;
+    // Zero crossings only mean something above the floor: in silence they count the noise.
+    this.zcr = this.levelDb >= gate ? crossings : 0;
 
     if (++this.hops % c.pitchEveryHops === 0) this.estimatePitch(activity.speaking, gate, dt * c.pitchEveryHops);
   }
@@ -158,6 +214,7 @@ export class UserVoiceAnalyzer {
   private estimatePitch(speaking: boolean, gate: number, dt: number): void {
     if (this.ringFill < this.ring.length || this.levelDb < gate) {
       this.estimate = NO_PITCH;
+      this.spectrum = NO_SPECTRUM;
     } else {
       // Unroll the ring into chronological order.
       const len = this.ring.length;
@@ -165,6 +222,7 @@ export class UserVoiceAnalyzer {
       this.windowBuf.set(this.ring.subarray(head), 0);
       this.windowBuf.set(this.ring.subarray(0, head), len - head);
       this.estimate = this.pitch.detect(this.windowBuf, this.pitchRate);
+      this.spectrum = this.spectral.analyze(this.windowBuf, this.pitchRate);
     }
     const hz = this.estimate.hz;
     this.reportedPitch = hz;
@@ -191,6 +249,8 @@ export class UserVoiceAnalyzer {
     return Math.sqrt(sq / v.length);
   }
 }
+
+const MAX_PCM_CHUNKS = 4;
 
 function clamp01(v: number): number {
   return v < 0 ? 0 : v > 1 ? 1 : v;

@@ -35,6 +35,10 @@ export interface ExtensionOptions {
   fakeMicWav: string | undefined;
   /** Grant the microphone up front (what the permission page does once for a real user). Default true. */
   grantMic: boolean;
+  /** Unpacked extension to load. Default: dist/. */
+  extensionDir: string;
+  /** Extra Chromium flags (e.g. to expose a software WebGPU adapter). */
+  chromiumArgs: string[];
 }
 
 export interface ExtensionFixtures {
@@ -48,11 +52,13 @@ export interface ExtensionFixtures {
 export const test = base.extend<ExtensionFixtures & ExtensionOptions>({
   fakeMicWav: [undefined, { option: true }],
   grantMic: [true, { option: true }],
-  context: async ({ fakeMicWav, grantMic }, use) => {
-    if (!existsSync(resolve(EXTENSION_DIR, 'manifest.json'))) {
-      throw new Error(`No built extension in ${EXTENSION_DIR}: run "npm run build:dev" first`);
+  extensionDir: [EXTENSION_DIR, { option: true }],
+  chromiumArgs: [[], { option: true }],
+  context: async ({ fakeMicWav, grantMic, extensionDir, chromiumArgs }, use) => {
+    if (!existsSync(resolve(extensionDir, 'manifest.json'))) {
+      throw new Error(`No built extension in ${extensionDir}: run "npm run build:dev" first`);
     }
-    const id = unpackedExtensionId(EXTENSION_DIR);
+    const id = unpackedExtensionId(extensionDir);
     const context = await chromium.launchPersistentContext('', {
       channel: 'chromium', // new headless: supports extensions
       headless: true,
@@ -60,13 +66,14 @@ export const test = base.extend<ExtensionFixtures & ExtensionOptions>({
       // Playwright mutes headless audio, which would make the captured tab audio all zeros.
       ignoreDefaultArgs: ['--mute-audio'],
       args: [
-        `--disable-extensions-except=${EXTENSION_DIR}`,
-        `--load-extension=${EXTENSION_DIR}`,
+        `--disable-extensions-except=${extensionDir}`,
+        `--load-extension=${extensionDir}`,
         // Lets the E2E hook start tabCapture without a click on the toolbar button (user gesture).
         `--allowlisted-extension-id=${id}`,
         '--autoplay-policy=no-user-gesture-required',
         '--use-angle=swiftshader',
         '--enable-unsafe-swiftshader',
+        ...chromiumArgs,
         ...(fakeMicWav
           ? [
               // Not --use-fake-ui-for-media-stream: it makes tabCapture's stream id fail ("Requested device not found").

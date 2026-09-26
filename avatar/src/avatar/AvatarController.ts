@@ -1,14 +1,16 @@
 import type * as THREE from 'three';
-import type { Avatar, BoneRotation, HumanBoneName } from './Avatar';
+import type { Avatar, BoneRotation, HumanBoneName, ProceduralPose } from './Avatar';
 import { CLOSED_MOUTH, type MouthSource } from './MouthShape';
 import { AvatarIdleController } from './AvatarIdleController';
 import type { AvatarState, AvatarStateProfile } from './AvatarStateProfiles';
-import { BehaviorMixer } from './BehaviorMixer';
+import { BehaviorMixer, type EmotionMixConfig, type EmotionMixState } from './BehaviorMixer';
+import { NEUTRAL_EMOTION_INPUTS, type EmotionInputs, type EmotionSource } from './EmotionExpression';
 import { ConversationStateMachine, type ConversationStateMachineOptions } from './ConversationStateMachine';
 import { NEUTRAL_REACTION, type ReactionSource } from './UserReaction';
 
 export type { MouthSource } from './MouthShape';
 export type { ReactionSource } from './UserReaction';
+export type { EmotionSource } from './EmotionExpression';
 
 export type StateChangeListener = (state: AvatarState, previous: AvatarState) => void;
 
@@ -23,6 +25,7 @@ export interface AvatarControllerApi {
   setIdleEnabled(enabled: boolean): void;
   setMouthSource(source: MouthSource | null): void;
   setReactionSource(source: ReactionSource | null): void;
+  setEmotionSource(source: EmotionSource | null): void;
 
   update(deltaTime: number): void;
 }
@@ -59,6 +62,8 @@ export class AvatarController implements AvatarControllerApi {
   private readonly onListenerError: (error: unknown) => void;
   private mouthSource: MouthSource | null = null;
   private reactionSource: ReactionSource | null = null;
+  private emotionSource: EmotionSource | null = null;
+  private lastEmotion: Readonly<EmotionInputs> = NEUTRAL_EMOTION_INPUTS;
 
   constructor(options: AvatarControllerOptions) {
     this.idle = options.idle ?? new AvatarIdleController();
@@ -178,6 +183,36 @@ export class AvatarController implements AvatarControllerApi {
     this.reactionSource = source;
   }
 
+  // --- Emotion -------------------------------------------------------------
+
+  /**
+   * Source of both voice channels' emotion (assistant self-expression, user reaction layer). Only BehaviorMixer
+   * turns it into behaviour; the source never touches the avatar, the mouth or the conversation state.
+   */
+  setEmotionSource(source: EmotionSource | null): void {
+    this.emotionSource = source;
+  }
+
+  /** Mapping bounds of the emotion layer (mutable, for debug tuning). */
+  get emotionConfig(): EmotionMixConfig {
+    return this.mixer.emotionConfig;
+  }
+
+  /** Effective emotion weights of the last frame (diagnostics). */
+  get emotionMix(): Readonly<EmotionMixState> {
+    return this.mixer.emotionMix;
+  }
+
+  /** Emotion inputs of the last frame (diagnostics). */
+  get emotionInputs(): Readonly<EmotionInputs> {
+    return this.lastEmotion;
+  }
+
+  /** Composed procedural pose of the last frame, also without an avatar (diagnostics, tests). */
+  get pose(): Readonly<ProceduralPose> {
+    return this.mixer.pose;
+  }
+
   // --- Frame -----------------------------------------------------------------
 
   update(deltaTime: number): void {
@@ -185,7 +220,9 @@ export class AvatarController implements AvatarControllerApi {
     const idlePose = this.idle.update(deltaTime);
     const mouth = this.mouthSource?.update(deltaTime) ?? CLOSED_MOUTH;
     const reaction = this.reactionSource?.update(deltaTime) ?? NEUTRAL_REACTION;
-    const pose = this.mixer.compose(idlePose, profile, mouth, reaction);
+    const emotion = this.emotionSource?.update(deltaTime) ?? NEUTRAL_EMOTION_INPUTS;
+    this.lastEmotion = emotion;
+    const pose = this.mixer.compose(idlePose, profile, mouth, reaction, emotion);
     if (!this.current) return;
     this.current.setProcedural(pose);
     this.current.update(deltaTime);

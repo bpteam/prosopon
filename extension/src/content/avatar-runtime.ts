@@ -6,11 +6,15 @@ import { AvatarController } from '@avatar/avatar/AvatarController';
 import { AvatarIdleController } from '@avatar/avatar/AvatarIdleController';
 import { AvatarLoader, disposeVRM } from '@avatar/avatar/AvatarLoader';
 import { UserReactionMapper } from '@avatar/avatar/UserReactionMapper';
+import { EmotionChannels } from '@avatar/avatar/EmotionChannels';
+import { EMOTION_EXPRESSIONS } from '@avatar/avatar/EmotionExpression';
+import type { EmotionMixConfig } from '@avatar/avatar/BehaviorMixer';
+import { NEUTRAL_EMOTION, type EmotionChannel, type EmotionFrame } from '@avatar/audio/emotion/EmotionFrame';
 import { SILENT_USER_VOICE_FRAME, type UserVoiceFrame } from '@avatar/audio/user/UserVoiceFrame';
 import { MAX_FRAME_DELTA, REST_POSE } from '@avatar/config';
 import { AvatarStage } from '@avatar/renderer/AvatarStage';
 import { RenderLoop } from '@avatar/renderer/RenderLoop';
-import { describeError, type AudioStatus, type ExtensionTabState, type MicStatus } from '../shared/messages';
+import { describeError, type AudioStatus, type EmotionStatus, type ExtensionTabState, type MicStatus } from '../shared/messages';
 import { AvatarOverlay } from './AvatarOverlay';
 import { ChatGPTAdapter, type ConversationUiAdapter, type VoiceUiSnapshot } from './ChatGPTAdapter';
 import { ConversationSignalResolver, type ConversationSignals } from './ConversationSignalResolver';
@@ -27,6 +31,7 @@ import { ConversationSignalResolver, type ConversationSignals } from './Conversa
  *   UserVoiceFrame.speaking ───┘
  *   UserVoiceFrame ─► UserReactionMapper ─► (ReactionSource) BehaviorMixer
  *   LipSyncFrame ─► FrameMouthSource ─► (MouthSource) BehaviorMixer      the mouth follows the assistant only
+ *   EmotionFrame (user, assistant) ─► EmotionChannels ─► (EmotionSource) BehaviorMixer   face/body, never the mouth
  */
 
 export interface AvatarRuntimeOptions {
@@ -64,6 +69,12 @@ export interface Diagnostics {
   crosstalkEvents: number;
   suppressedInterruptions: number;
   nods: number;
+  emotionStatus: EmotionStatus;
+  /** Last EmotionFrame received per channel (as sent; the avatar follows it smoothly). */
+  emotion: Record<EmotionChannel, Readonly<EmotionFrame>>;
+  emotionFrames: Record<EmotionChannel, number>;
+  /** Debug switches: "User emotion reactions" / "Assistant emotion expression". */
+  emotionEnabled: Record<EmotionChannel, boolean>;
 }
 
 /** Development builds: the same data for DevTools (select the extension's content-script context in the console). */
@@ -72,6 +83,10 @@ export interface ProsoponDebug {
   userVoiceFrame: Readonly<UserVoiceFrame>;
   conversationSignals: Readonly<ConversationSignals>;
   resolvedState: string;
+  /** Turn a voice channel's emotion influence on/off (fades). */
+  setEmotionEnabled(channel: EmotionChannel, enabled: boolean): void;
+  /** Mapping bounds of the emotion layer; mutable for calibration. */
+  emotionConfig: EmotionMixConfig;
 }
 
 declare global {
@@ -85,6 +100,8 @@ export interface AvatarRuntimeHandle {
   setAudioStatus(status: AudioStatus): void;
   pushUserVoice(frame: UserVoiceFrame): void;
   setMicStatus(status: MicStatus): void;
+  pushEmotion(channel: EmotionChannel, frame: EmotionFrame): void;
+  setEmotionStatus(status: EmotionStatus): void;
   setOffscreenConnected(connected: boolean): void;
   setExtensionState(state: ExtensionTabState, error?: string): void;
   readonly diagnostics: Readonly<Diagnostics>;
@@ -94,6 +111,11 @@ export interface AvatarRuntimeHandle {
 const MODEL_PATH = 'models/avatar.vrm';
 /** Diagnostics text/attributes refresh rate, Hz: DOM writes at 60 Hz would be wasted work. */
 const DEBUG_RATE = 8;
+/**
+ * DOM event for toggling the emotion channels from a test or the page console (development builds):
+ *   document.dispatchEvent(new CustomEvent('prosopon:emotion', { detail: { channel: 'user', enabled: false } }))
+ */
+const EMOTION_DEBUG_EVENT = 'prosopon:emotion';
 
 export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle {
   const doc = options.doc ?? document;
@@ -108,6 +130,8 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
   const reaction = new UserReactionMapper();
   controller.setReactionSource(reaction);
   const resolver = new ConversationSignalResolver(controller);
+  const emotion = new EmotionChannels();
+  controller.setEmotionSource(emotion);
   /** Seconds since the last user voice frame; the user is not speaking once frames stop. */
   let userFrameAge = Infinity;
   const USER_FRAME_STALE = 0.5;
@@ -135,12 +159,40 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
     crosstalkEvents: 0,
     suppressedInterruptions: 0,
     nods: 0,
+    emotionStatus: { model: 'off', mode: 'heuristic', inferences: 0 },
+    emotion: { user: NEUTRAL_EMOTION, assistant: NEUTRAL_EMOTION },
+    emotionFrames: { user: 0, assistant: 0 },
+    emotionEnabled: { user: true, assistant: true },
   };
+  const toggles: Partial<Record<EmotionChannel, HTMLInputElement | null>> = {};
+  const setEmotionEnabled = (channel: EmotionChannel, enabled: boolean) => {
+    emotion.setEnabled(channel, enabled);
+    diag.emotionEnabled[channel] = enabled;
+    const input = toggles[channel];
+    if (input && input.checked !== enabled) input.checked = enabled;
+  };
+  const onEmotionDebug = (event: Event) => {
+    const d = (event as CustomEvent<{ channel?: unknown; enabled?: unknown }>).detail;
+    if ((d?.channel === 'user' || d?.channel === 'assistant') && typeof d.enabled === 'boolean') {
+      setEmotionEnabled(d.channel, d.enabled);
+    }
+  };
+  if (options.debug) {
+    toggles.user = overlay.addDebugToggle('prosopon-user-emotion', 'User emotion reactions', true, (on) =>
+      setEmotionEnabled('user', on),
+    );
+    toggles.assistant = overlay.addDebugToggle('prosopon-assistant-emotion', 'Assistant emotion expression', true, (on) =>
+      setEmotionEnabled('assistant', on),
+    );
+    doc.addEventListener(EMOTION_DEBUG_EVENT, onEmotionDebug);
+  }
   const resetUserVoice = () => {
     diag.userVoice = SILENT_USER_VOICE_FRAME;
     userFrameAge = Infinity;
     reaction.reset();
     resolver.setUserSpeaking(false);
+    emotion.reset('user');
+    diag.emotion.user = NEUTRAL_EMOTION;
   };
   if (options.debug) {
     window.__PROSOPON_DEBUG__ = {
@@ -155,6 +207,10 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
       },
       get resolvedState() {
         return resolver.resolved;
+      },
+      setEmotionEnabled,
+      get emotionConfig() {
+        return controller.emotionConfig;
       },
     };
   }
@@ -260,6 +316,35 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
     d.crosstalk = String(conv.crosstalkEvents);
     d.nods = String(reaction.nods);
     const r = reaction.value;
+    const mix = controller.emotionMix;
+    const pose = controller.pose;
+    const followed = emotion.value;
+    for (const ch of ['user', 'assistant'] as const) {
+      const f = followed[ch];
+      const prefix = ch === 'user' ? 'userEmotion' : 'assistantEmotion';
+      d[`${prefix}Active`] = String(f.active);
+      d[`${prefix}Arousal`] = f.arousal.toFixed(3);
+      d[`${prefix}Valence`] = f.valence.toFixed(3);
+      d[`${prefix}Energy`] = f.energy.toFixed(3);
+      d[`${prefix}Confidence`] = f.confidence.toFixed(3);
+      d[`${prefix}Mode`] = diag.emotion[ch].mode;
+      d[`${prefix}Frames`] = String(diag.emotionFrames[ch]);
+      d[`${prefix}Enabled`] = String(diag.emotionEnabled[ch]);
+    }
+    d.emotionModel = diag.emotionStatus.model;
+    d.emotionInferences = String(diag.emotionStatus.inferences);
+    d.emotionMixAssistant = mix.assistant.toFixed(3);
+    d.emotionMixUser = mix.user.toFixed(3);
+    d.emotionExpressions = EMOTION_EXPRESSIONS.map((e) => `${e}:${pose[e].toFixed(3)}`).join(' ');
+    const emotionLines = (['user', 'assistant'] as const).map((ch) => {
+      const f = followed[ch];
+      const sign = (v: number) => (v >= 0 ? '+' : '') + v.toFixed(2);
+      return [
+        `${ch.padEnd(11)} ${diag.emotionEnabled[ch] ? 'ON ' : 'OFF'} · ${f.active ? 'active' : 'silent'} · ${diag.emotion[ch].mode} · ${diag.emotionFrames[ch]} frames`,
+        `            val ${sign(f.valence)} (c ${f.valenceConfidence.toFixed(2)}) · aro ${f.arousal.toFixed(2)} · en ${f.energy.toFixed(2)} · ten ${f.tension.toFixed(2)}`,
+        `            lift ${sign(f.pitchLift)} · var ${f.pitchVariation.toFixed(2)} · rate ${f.speechRate.toFixed(2)} · conf ${f.confidence.toFixed(2)}`,
+      ].join('\n');
+    });
     overlay.setDebugText(
       [
         `extension   ${diag.extensionState}${diag.extensionError ? ` (${diag.extensionError})` : ''}`,
@@ -279,6 +364,9 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
         '— Conversation',
         `signals     voice UI ${conv.signals.voiceUiActive ? 'on' : 'off'} · user ${conv.signals.userSpeaking ? 'speaking' : '—'} · assistant ${conv.signals.assistantSpeaking ? 'speaking' : '—'}`,
         `resolved    ${conv.resolved}${conv.crosstalk ? ' · CROSSTALK' : ''} · crosstalk ${conv.crosstalkEvents} · ignored ${conv.suppressedInterruptions}`,
+        `— Emotion / Prosody · model ${diag.emotionStatus.model} · ${diag.emotionStatus.inferences} runs${diag.emotionStatus.error ? ` (${diag.emotionStatus.error})` : ''}`,
+        ...emotionLines,
+        `mix         assistant ${mix.assistant.toFixed(2)} · user ${mix.user.toFixed(2)} · ${EMOTION_EXPRESSIONS.map((e) => `${e.slice(0, 5)} ${pose[e].toFixed(2)}`).join(' ')}`,
       ].join('\n'),
     );
   }
@@ -312,6 +400,16 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
       diag.mic = status;
       if (status.state !== 'on') resetUserVoice();
     },
+    pushEmotion(channel, frame) {
+      // Same rule as pushUserVoice: a user frame in flight after reactions were turned off drives nothing.
+      if (channel === 'user' && diag.mic.state !== 'on') return;
+      diag.emotion[channel] = frame;
+      diag.emotionFrames[channel]++;
+      emotion.push(channel, frame);
+    },
+    setEmotionStatus(status) {
+      diag.emotionStatus = status;
+    },
     setOffscreenConnected(connected) {
       diag.offscreenConnected = connected;
       if (!connected) {
@@ -320,6 +418,8 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
         resolver.setAssistantAudioActive(false);
         diag.mic = { state: 'off' };
         resetUserVoice();
+        emotion.reset('assistant');
+        diag.emotion.assistant = NEUTRAL_EMOTION;
       }
     },
     setExtensionState(state, error) {
@@ -331,6 +431,7 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
       disposed = true;
       loop.stop();
       stopObserving();
+      doc.removeEventListener(EMOTION_DEBUG_EVENT, onEmotionDebug);
       if (window.__PROSOPON_DEBUG__?.diagnostics === diag) delete window.__PROSOPON_DEBUG__;
       restoreOrb?.();
       restoreOrb = null;
