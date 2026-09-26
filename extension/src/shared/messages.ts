@@ -79,6 +79,9 @@ export type ExtensionPayload =
   | { type: 'capture:ended'; tabId: number; reason: string }
   /** Content → SW on load. Reply: a tab:state message. */
   | { type: 'tab:hello' }
+  /** Popup → service worker: enable/disable Prosopon for the active ChatGPT tab. */
+  | { type: 'prosopon:toggle' }
+  | { type: 'prosopon:status' }
   /** SW → content. */
   | { type: 'tab:state'; state: ExtensionTabState; error?: string }
   /** Offscreen → content over LIPSYNC_PORT, 20–30 per second. */
@@ -148,6 +151,8 @@ const VALIDATORS: Record<MessageType, Validator> = {
   'capture:list': () => true,
   'capture:ended': (m) => isTabId(m.tabId) && typeof m.reason === 'string',
   'tab:hello': () => true,
+  'prosopon:toggle': () => true,
+  'prosopon:status': () => true,
   'tab:state': (m) =>
     TAB_STATES.includes(m.state as ExtensionTabState) && (m.error === undefined || typeof m.error === 'string'),
   'lipsync:frame': (m) => isLipSyncFrame(m.frame),

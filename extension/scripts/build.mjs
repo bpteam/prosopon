@@ -24,9 +24,7 @@ const watch = args.includes('--watch')
     : {}
   : null;
 const dev = mode === 'development';
-const ml = process.env.PROSOPON_ML === '1';
 const embedModel = process.env.PROSOPON_EMBED_MODEL === '1';
-if (embedModel && !ml) throw new Error('PROSOPON_EMBED_MODEL=1 requires PROSOPON_ML=1');
 // import.meta.env.DEV follows NODE_ENV, not --mode: development builds carry the diagnostics and the E2E hook.
 process.env.NODE_ENV = dev ? 'development' : 'production';
 
@@ -39,13 +37,12 @@ const shared = {
     // Core sources live outside this package; make sure there is one copy of three.
     dedupe: ['three', '@pixiv/three-vrm'],
   },
-  define: { __PROSOPON_ML__: JSON.stringify(ml), __PROSOPON_EMBED_MODEL__: JSON.stringify(embedModel) },
+  define: { __PROSOPON_ML__: 'true', __PROSOPON_EMBED_MODEL__: JSON.stringify(embedModel) },
 };
 
 /**
  * Files that are not imported by code: manifest, the wLipSync worklet/WASM for the CSP-safe split build, and ONNX
- * Runtime's WebAssembly binary for the optional local emotion model (the one build that serves both the WebGPU and
- * the WASM backend; it's loaded only when emotion-model/model.json exists).
+ * Runtime's WebAssembly binary for the local emotion model (loaded only after the user installs the model).
  */
 function copyStatic() {
   const files = [
@@ -53,7 +50,7 @@ function copyStatic() {
     [resolve(avatarRoot, 'node_modules/wlipsync/dist/audio-processor.js'), 'lipsync/wlipsync/audio-processor.js'],
     [resolve(avatarRoot, 'node_modules/wlipsync/dist/wlipsync.wasm'), 'lipsync/wlipsync/wlipsync.wasm'],
   ];
-  if (ml) files.push([resolve(avatarRoot, 'node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.jsep.wasm'), 'ort/ort-wasm-simd-threaded.jsep.wasm']);
+  files.push([resolve(avatarRoot, 'node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.jsep.wasm'), 'ort/ort-wasm-simd-threaded.jsep.wasm']);
   // Deliberately opt-in: distributors place the verified artifact here before making a Web Store-safe embedded build.
   if (embedModel) files.push([resolve(root, 'model-assets/distilhubert_ser_int8.onnx'), 'emotion-model/distilhubert_ser_int8.onnx']);
   return {
@@ -64,11 +61,6 @@ function copyStatic() {
         await copyFile(from, resolve(outDir, to));
       }
       const manifest = JSON.parse(await readFile(resolve(root, 'manifest.json'), 'utf8'));
-      if (ml) {
-        manifest.host_permissions = [...manifest.host_permissions, 'https://huggingface.co/*'];
-        manifest.content_security_policy = { extension_pages: "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';" };
-        manifest.action.default_popup = 'popup/index.html';
-      }
       await writeFile(resolve(outDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
     },
   };
@@ -145,4 +137,4 @@ await build({
   },
 });
 
-if (!watch) console.log(`[prosopon] built ${ml ? 'ML' : 'basic'} ${mode} extension into ${outDir}`);
+if (!watch) console.log(`[prosopon] built ${mode} extension into ${outDir}`);

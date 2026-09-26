@@ -7,6 +7,7 @@ const EXT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const manifest = JSON.parse(readFileSync(resolve(EXT, 'manifest.json'), 'utf8')) as {
   permissions: string[];
   content_scripts: { js: string[] }[];
+  action: { default_popup?: string };
 };
 const serviceWorker = readFileSync(resolve(EXT, 'src/background/service-worker.ts'), 'utf8');
 const buildScript = readFileSync(resolve(EXT, 'scripts/build.mjs'), 'utf8');
@@ -43,16 +44,16 @@ describe('microphone reactions (US-005)', () => {
   });
 });
 
-describe('local emotion model build modes (US-007)', () => {
+describe('local emotion model (US-007)', () => {
   const csp = (manifest as unknown as { content_security_policy?: { extension_pages?: string } }).content_security_policy;
 
-  it('keeps the basic manifest free of ML CSP capability, adding it only to the ML package', () => {
-    expect(csp).toBeUndefined();
-    expect(buildScript).toMatch(/PROSOPON_ML/);
-    expect(buildScript).toMatch(/'wasm-unsafe-eval'/);
+  it("ships the local ONNX runtime capability and popup in the single extension build", () => {
+    expect(csp?.extension_pages).toMatch(/script-src 'self' 'wasm-unsafe-eval'/);
+    expect(buildScript).toMatch(/ort-wasm-simd-threaded/);
+    expect(manifest.action).toMatchObject({ default_popup: 'popup/index.html' });
   });
 
-  it('keeps the basic package permission-minimal', () => {
+  it('uses only the required scoped model host permission', () => {
     expect(manifest.permissions).toEqual(['tabCapture', 'offscreen', 'scripting', 'contextMenus', 'storage']);
   });
 });

@@ -12,13 +12,17 @@
     "storage"
   ],
   "host_permissions": [
-    "https://chatgpt.com/*"
+    "https://chatgpt.com/*",
+    "https://huggingface.co/*"
   ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';"
+  },
   "background": {
     "service_worker": "background.js",
     "type": "module"
   },
-  "action": { "default_title": "Enable Prosopon" },
+  "action": { "default_title": "Prosopon", "default_popup": "popup/index.html" },
   "content_scripts": [
     {
       "matches": [

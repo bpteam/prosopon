@@ -74,6 +74,8 @@ class CaptureSession {
   /** The assistant's voice channel of this tab. */
   readonly emotion: ProsodyChannel;
   private detachFeatures: (() => void) | null = null;
+  /** Whether this capture's worklet must emit transient PCM chunks for the local model. */
+  private modelPcm = false;
   private readonly lipSync = new VisemeLipSync(new AmplitudeLipSync(() => this.input.readRms()));
   private readonly host = new VisemeAnalyzerHost(this.input, this.lipSync, factories, AUDIO_RUNTIME_CONFIG.analyzer);
   private readonly ports = new Set<chrome.runtime.Port>();
@@ -93,6 +95,7 @@ class CaptureSession {
       (frame) => this.broadcast({ type: 'emotion:frame', channel: 'assistant', frame }),
       emotionHost,
     );
+    this.modelPcm = emotionHost !== null;
   }
 
   static async start(
@@ -130,7 +133,7 @@ class CaptureSession {
         ctx,
         url('worklets/user-voice.js'),
         (node) => this.input.addTap(node),
-        { frameRate: AUDIO_RUNTIME_CONFIG.userFrameRate, pcm: emotionHost !== null },
+        { frameRate: AUDIO_RUNTIME_CONFIG.userFrameRate, pcm: this.modelPcm },
         (frame) => this.emotion.pushFeatures(frame),
         (samples, rate) => this.emotion.pushPcm(samples, rate),
       );
@@ -139,6 +142,15 @@ class CaptureSession {
     } catch (error) {
       console.warn('[prosopon] assistant prosody unavailable; lip sync continues:', error);
     }
+  }
+
+  /** Rebuild just the feature tap after a model became available after tab capture had already begun. */
+  async enableEmotionPcm(): Promise<void> {
+    if (this.disposed || this.modelPcm) return;
+    this.modelPcm = true;
+    this.detachFeatures?.();
+    this.detachFeatures = null;
+    await this.startEmotion();
   }
 
   addPort(port: chrome.runtime.Port): void {
@@ -219,6 +231,7 @@ const sessions = new Map<number, CaptureSession>();
 /** Optional local emotion model, shared by every channel; null = prosody rules only. */
 let emotionHost: EmotionModelHost | null = null;
 let emotionStatus: EmotionStatus = { model: 'off', mode: 'heuristic', inferences: 0 };
+let emotionLoad: Promise<void> | null = null;
 
 /** The user's voice channel: one for all tabs, like the microphone. */
 const userEmotion = new ProsodyChannel('user', AUDIO_RUNTIME_CONFIG.userFrameRate, (frame) =>
@@ -251,11 +264,16 @@ function setEmotionStatus(status: EmotionStatus): void {
 }
 
 /**
- * Reads an opted-in installed model only when the offscreen audio runtime exists. The basic build has this branch
- * compiled away, so it never ships ONNX Runtime or model-install code.
+ * Reads an opted-in installed model only when the offscreen audio runtime exists.
  */
-async function loadEmotionModel(): Promise<void> {
-  if (emotionHost) return;
+function loadEmotionModel(): Promise<void> {
+  if (emotionHost) return Promise.resolve();
+  if (emotionLoad) return emotionLoad;
+  emotionLoad = loadEmotionModelOnce().finally(() => { emotionLoad = null; });
+  return emotionLoad;
+}
+
+async function loadEmotionModelOnce(): Promise<void> {
   if (!__PROSOPON_ML__) return;
   try {
     const { installedEmotionModel } = await import('../emotion/InstalledModel');
@@ -265,12 +283,21 @@ async function loadEmotionModel(): Promise<void> {
     const host = new EmotionModelHost(spec, onnxEmotionLoader({ wasmUrl: url(AUDIO_RUNTIME_CONFIG.ortWasmPath) }));
     emotionHost = host;
     userEmotion.attachHost(host);
-    for (const session of sessions.values()) session.emotion.attachHost(host);
+    for (const session of sessions.values()) {
+      session.emotion.attachHost(host);
+      void session.enableEmotionPcm();
+    }
     setEmotionStatus({ model: 'loading', mode: 'heuristic', inferences: 0 });
     await host.load();
     refreshEmotionStatus();
-  } catch {
-    setEmotionStatus({ model: 'failed', mode: 'fallback', inferences: 0, error: 'emotion model could not be initialized' });
+    // The microphone worklet chooses PCM output at creation. Restart only the local analysis graph when it was
+    // already running, so it begins sending transient chunks to the newly ready local model.
+    if (host.status === 'ready' && userVoice.running) {
+      userVoice.stop();
+      void syncMic();
+    }
+  } catch (error) {
+    setEmotionStatus({ model: 'failed', mode: 'fallback', inferences: 0, error: `emotion model could not be initialized: ${describeError(error)}` });
   }
 }
 
@@ -285,7 +312,11 @@ function refreshEmotionStatus(): EmotionStatus {
 void loadEmotionModel();
 async function selfTestEmotionModel(): Promise<{ ok: true } | { ok: false; error: string }> {
   await loadEmotionModel();
-  try { await emotionHost?.selfTest(); return emotionHost ? { ok: true } : { ok: false, error: 'model is not available' }; }
+  try {
+    if (!emotionHost) return { ok: false, error: emotionStatus.error ?? 'Installed model was not found in local storage.' };
+    await emotionHost.selfTest();
+    return { ok: true };
+  }
   catch (error) { return { ok: false, error: describeError(error) }; }
 }
 function deactivateEmotionModel(): void {

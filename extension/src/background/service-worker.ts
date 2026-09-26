@@ -217,6 +217,13 @@ async function toggle(tab: chrome.tabs.Tab): Promise<void> {
   await sessions.toggle(tab.id);
 }
 
+async function activeTabState(): Promise<{ state: ExtensionTabState; error?: string }> {
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  if (tab?.id === undefined || !isChatGptUrl(tab.url)) return { state: 'disabled', error: 'Open chatgpt.com to enable the avatar.' };
+  const current = sessions.get(tab.id);
+  return { state: current.state, error: current.error };
+}
+
 chrome.action.onClicked.addListener((tab) => void toggle(tab));
 
 /**
@@ -251,6 +258,16 @@ chrome.runtime.onMessage.addListener((raw, sender, sendResponse) => {
       });
       return true;
     }
+    case 'prosopon:status':
+      void ready.then(() => activeTabState().then(sendResponse));
+      return true;
+    case 'prosopon:toggle':
+      void ready.then(async () => {
+        const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+        if (tab) await toggle(tab);
+        sendResponse(await activeTabState());
+      });
+      return true;
     case 'capture:ended':
       void ready.then(() => sessions.captureEnded(msg.tabId, msg.reason));
       return;

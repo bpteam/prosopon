@@ -4,9 +4,10 @@ import { IndexedDbModelStorage } from './ModelStorage';
 
 /** Reads only validated, opted-in model bytes; called lazily by the offscreen audio runtime. */
 export async function installedEmotionModel(): Promise<{ spec: EmotionModelSpec; data: ArrayBuffer } | null> {
-  const metadata = (await chrome.storage.local.get('emotionModelMetadata')).emotionModelMetadata as
-    | { modelId?: string; revision?: string; sha256?: string; enabled?: boolean } | undefined;
-  if (!metadata?.enabled || metadata.modelId !== EMOTION_MODEL.id || metadata.revision !== EMOTION_MODEL.modelRevision || metadata.sha256 !== EMOTION_MODEL.sha256) return null;
+  // Offscreen documents have runtime messaging but not the full chrome.storage API. The service worker owns the
+  // metadata check; IndexedDB remains directly available here for the model bytes.
+  const state = await chrome.runtime.sendMessage({ v: 3, type: 'emotion:model-info' }) as { installed?: boolean; enabled?: boolean };
+  if (!state?.installed || !state.enabled) return null;
   const storage = new IndexedDbModelStorage();
   if (!(await storage.has(EMOTION_MODEL_KEY))) return null;
   return {
