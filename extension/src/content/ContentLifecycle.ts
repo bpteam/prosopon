@@ -114,6 +114,10 @@ export class ContentLifecycle {
       runtime.pushFrame(msg.frame);
     } else if (msg.type === 'audio:status') {
       runtime.setAudioStatus(msg.status);
+    } else if (msg.type === 'user:frame') {
+      runtime.pushUserVoice(msg.frame);
+    } else if (msg.type === 'user:status') {
+      runtime.setMicStatus(msg.status);
     }
   }
 

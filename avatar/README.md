@@ -45,7 +45,9 @@ src/
 │   ├── AvatarController.ts     public API of the subsystem: conversation state, manual proxies, update()
 │   ├── ConversationStateMachine.ts  idle/listening/thinking/speaking + delta-time profile blending
 │   ├── AvatarStateProfiles.ts  per-state profiles (multipliers/offsets), transition duration
-│   ├── BehaviorMixer.ts        merges idle pose + state profile into the one ProceduralPose
+│   ├── BehaviorMixer.ts        merges idle pose + state profile + mouth + user reaction into the one ProceduralPose
+│   ├── UserReaction.ts         three-free reaction contract (engagement, pitch lift, nod) + REACTION_LIMITS
+│   ├── UserReactionMapper.ts   UserVoiceFrame → bounded UserReactionFrame, end-of-utterance nod (a ReactionSource)
 │   ├── Avatar.ts               engine-facing API over a VRM: expressions, bones, transform, gaze
 │   ├── AvatarLoader.ts         GLTFLoader + VRMLoaderPlugin + VRMUtils optimisations
 │   ├── AvatarIdleController.ts procedural idle: breathing, blink, head micro-motion, gaze
@@ -57,6 +59,8 @@ src/
 │   ├── VisemeAnalyzer.ts       analyser contract: an input node + read() of the current mouth shape
 │   ├── VisemeAnalyzerHost.ts   lazy creation, tap into AudioInput, failure → amplitude
 │   ├── analyzers/              HeadAudio and wLipSync adapters + their phoneme → VRM tables
+│   ├── user/                   the user's voice (US-005), no Web Audio/avatar deps: VoiceActivityDetector,
+│   │                           PitchDetector (MPM), PitchBaseline, UserVoiceAnalyzer, UserVoiceFrame, worklet
 │   ├── LipSyncDebugPanel.ts    "Lip Sync" GUI folder: sources, mapping, live level
 │   └── VisemeDebugPanel.ts     "Visemes" subfolder: analyser choice/status, blending, live weights
 ├── vendor/headaudio/           HeadAudio main-thread module (not on npm; see its README)
@@ -66,7 +70,7 @@ src/
 ```
 
 Frame order: `delta → controller.update(delta) → renderer.render()`, where `controller.update` is
-`state transition → idle.update → mouthSource.update → BehaviorMixer.compose → avatar.setProcedural → avatar.update [layers, vrm.update]`.
+`state transition → idle.update → mouthSource.update → reactionSource.update → BehaviorMixer.compose → avatar.setProcedural → avatar.update [layers, vrm.update]`.
 
 ### Conversation state
 

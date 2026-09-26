@@ -1,8 +1,10 @@
 // Builds the unpacked extension into dist/.
 //
-// Two Vite builds, because content scripts can't be ES modules while everything else should be:
-//  1. ES: service worker, offscreen document, and the avatar runtime the content script imports on activation.
+// Three Vite builds, because content scripts can't be ES modules while everything else should be:
+//  1. ES: service worker, offscreen document, microphone permission page, and the avatar runtime the content
+//     script imports on activation.
 //  2. IIFE: the content script itself, kept tiny (no three.js) since it runs on every chatgpt.com page.
+//  3. ES, single file: the user-voice AudioWorklet module (worklets load one module by URL, without chunks).
 //
 //   node scripts/build.mjs [--mode development] [--watch]
 import { copyFile, mkdir } from 'node:fs/promises';
@@ -74,6 +76,7 @@ await build({
       input: {
         background: resolve(root, 'src/background/service-worker.ts'),
         offscreen: resolve(root, 'src/offscreen/index.html'),
+        permission: resolve(root, 'src/permission/index.html'),
         'avatar-runtime': resolve(root, 'src/content/avatar-runtime.ts'),
       },
       preserveEntrySignatures: 'exports-only',
@@ -101,6 +104,24 @@ await build({
       formats: ['iife'],
       name: 'prosoponContent',
       fileName: () => 'content.js',
+    },
+  },
+});
+
+await build({
+  ...shared,
+  root,
+  publicDir: false,
+  build: {
+    outDir,
+    emptyOutDir: false,
+    watch,
+    minify: !dev,
+    sourcemap: dev ? 'inline' : false,
+    lib: {
+      entry: resolve(avatarRoot, 'src/audio/user/UserVoiceWorklet.ts'),
+      formats: ['es'],
+      fileName: () => 'worklets/user-voice.js',
     },
   },
 });

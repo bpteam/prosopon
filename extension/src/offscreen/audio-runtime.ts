@@ -13,12 +13,19 @@ import {
   type CaptureListReply,
   type CaptureReply,
   type ExtensionPayload,
+  type MicInfo,
+  type MicStatus,
 } from '../shared/messages';
+import { UserVoicePipeline } from './UserVoicePipeline';
 
 /**
- * Offscreen audio runtime: tab capture → AudioInput → existing lip-sync pipeline → LipSyncFrame, streamed to the
- * tab's content script over a Port. The only extension context that touches audio; it knows nothing about the
- * avatar, three.js or ChatGPT's DOM.
+ * Offscreen audio runtime, the only extension context that touches audio. Two independent pipelines:
+ *
+ *   assistant: tab capture → AudioInput → existing lip-sync pipeline → LipSyncFrame, per tab
+ *   user:      microphone → UserVoicePipeline (own AudioContext, worklet) → UserVoiceFrame, one for all tabs
+ *
+ * They never share a node or a context; each only produces frames, streamed to the content scripts over their
+ * Ports. Knows nothing about the avatar, three.js or ChatGPT's DOM.
  */
 
 export const AUDIO_RUNTIME_CONFIG = {
@@ -32,6 +39,8 @@ export const AUDIO_RUNTIME_CONFIG = {
    * 0 by default: any value adds the same delay to ChatGPT's answers.
    */
   monitorDelay: 0,
+  /** UserVoiceFrames per second (counted in audio time by the worklet). */
+  userFrameRate: 25,
 };
 
 const url = (path: string) => chrome.runtime.getURL(path);
@@ -100,6 +109,7 @@ class CaptureSession {
       });
     }
     this.sinceStatus = Infinity; // new listener: send the status right away
+    this.send(port, { type: 'user:status', status: userVoice.status });
   }
 
   dispose(): void {
@@ -138,20 +148,46 @@ class CaptureSession {
     }
   }
 
-  private broadcast(payload: ExtensionPayload): void {
+  broadcast(payload: ExtensionPayload): void {
     if (this.ports.size === 0) return;
-    const msg = message(payload);
-    for (const port of this.ports) {
-      try {
-        port.postMessage(msg);
-      } catch {
-        this.ports.delete(port); // content script went away between disconnect events
-      }
+    for (const port of this.ports) this.send(port, payload);
+  }
+
+  private send(port: chrome.runtime.Port, payload: ExtensionPayload): void {
+    try {
+      port.postMessage(message(payload));
+    } catch {
+      this.ports.delete(port); // content script went away between disconnect events
     }
   }
 }
 
 const sessions = new Map<number, CaptureSession>();
+
+/** One microphone for the whole browser: its frames go to every enabled tab. */
+const userVoice = new UserVoicePipeline(
+  {
+    getUserMedia: (constraints) => navigator.mediaDevices.getUserMedia(constraints),
+    createContext: () => new AudioContext(),
+    workletUrl: url('worklets/user-voice.js'),
+    frameRate: AUDIO_RUNTIME_CONFIG.userFrameRate,
+  },
+  (frame) => broadcastAll({ type: 'user:frame', frame }),
+  (status) => broadcastAll({ type: 'user:status', status }),
+);
+/** Set by the service worker from the user's opt-in; off until then. */
+let micWanted = false;
+
+function broadcastAll(payload: ExtensionPayload): void {
+  for (const session of sessions.values()) session.broadcast(payload);
+}
+
+/** The mic track exists only while the user wants reactions AND at least one tab is enabled. */
+function syncMic(): Promise<MicStatus> {
+  if (micWanted && sessions.size > 0) return userVoice.start();
+  userVoice.stop();
+  return Promise.resolve(userVoice.status);
+}
 /** In-flight starts. A stop, or a newer start after a stop, replaces/removes the entry, which cancels the old one. */
 const starting = new Map<number, { promise: Promise<CaptureReply> }>();
 
@@ -159,6 +195,7 @@ function endSession(session: CaptureSession, reason: string): void {
   if (sessions.get(session.tabId) !== session) return;
   sessions.delete(session.tabId);
   session.dispose();
+  void syncMic();
   void chrome.runtime.sendMessage(message({ type: 'capture:ended', tabId: session.tabId, reason })).catch(() => {});
 }
 
@@ -176,6 +213,7 @@ function start(tabId: number, streamId: string): Promise<CaptureReply> {
         return { ok: false, error: 'stopped while starting' };
       }
       sessions.set(tabId, session);
+      void syncMic();
       return { ok: true };
     } catch (error) {
       return { ok: false, error: describeError(error) };
@@ -192,6 +230,7 @@ function stop(tabId: number): CaptureReply {
   const session = sessions.get(tabId);
   sessions.delete(tabId);
   session?.dispose();
+  void syncMic();
   return { ok: true };
 }
 
@@ -207,6 +246,13 @@ chrome.runtime.onMessage.addListener((raw, _sender, sendResponse) => {
       return;
     case 'capture:list':
       sendResponse({ tabIds: [...sessions.keys()] } satisfies CaptureListReply);
+      return;
+    case 'mic:set':
+      micWanted = msg.enabled;
+      void syncMic().then(sendResponse);
+      return true;
+    case 'mic:info':
+      sendResponse(userVoice.info satisfies MicInfo);
       return;
     default:
       return;

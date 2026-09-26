@@ -59,3 +59,32 @@ describe('debug:analyzer', () => {
     expect(parseMessage({ v: PROTOCOL_VERSION, type: 'debug:analyzer' })).toBeNull();
   });
 });
+
+describe('user voice messages (US-005)', () => {
+  const frame = { speaking: true, segmentDuration: 0.4, rmsDb: -30, noiseFloorDb: -60, energy: 0.5, pitchHz: 180, pitchConfidence: 0.9, relativePitch: 1.5, pitchVariation: 0.8 };
+
+  it('accepts a UserVoiceFrame and mic statuses', () => {
+    expect(parseMessage(message({ type: 'user:frame', frame }))).not.toBeNull();
+    expect(parseMessage(message({ type: 'user:frame', frame: { ...frame, pitchHz: null } }))).not.toBeNull();
+    expect(parseMessage(message({ type: 'user:status', status: { state: 'denied', error: 'x' } }))).not.toBeNull();
+    expect(parseMessage(message({ type: 'mic:set', enabled: true }))).not.toBeNull();
+  });
+
+  it('rejects anything carrying audio: buffers, streams or extra fields in a frame', () => {
+    for (const bad of [
+      { ...frame, samples: new Float32Array(128) },
+      { ...frame, pcm: new ArrayBuffer(256) },
+      { ...frame, rmsDb: new Float32Array(1) },
+      { ...frame, energy: 3 },
+      new Float32Array(9),
+    ]) {
+      expect(parseMessage({ v: PROTOCOL_VERSION, type: 'user:frame', frame: bad })).toBeNull();
+    }
+    expect(parseMessage({ v: PROTOCOL_VERSION, type: 'user:status', status: { state: 'recording' } })).toBeNull();
+    expect(parseMessage({ v: PROTOCOL_VERSION, type: 'mic:set', enabled: 'yes' })).toBeNull();
+  });
+
+  it('a frame serialises to plain JSON of the same shape (nothing lost or hidden in transport)', () => {
+    expect(JSON.parse(JSON.stringify(frame))).toEqual(frame);
+  });
+});

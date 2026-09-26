@@ -1,4 +1,5 @@
 import { isLipSyncFrame, type LipSyncFrame } from '@avatar/audio/LipSyncFrame';
+import { isUserVoiceFrame, type UserVoiceFrame } from '@avatar/audio/user/UserVoiceFrame';
 
 /**
  * Protocol between the service worker, the offscreen audio runtime and the content script.
@@ -21,6 +22,32 @@ export interface AudioStatus {
   analyzer: string;
 }
 
+/**
+ * Microphone reactions (the user's voice pipeline in the offscreen document):
+ * off (not wanted, or no tab enabled) · starting · on · denied (no permission for the extension origin) ·
+ * unavailable (no device, or the device went away) · error.
+ */
+export type MicState = 'off' | 'starting' | 'on' | 'denied' | 'unavailable' | 'error';
+
+export const MIC_STATES: readonly MicState[] = ['off', 'starting', 'on', 'denied', 'unavailable', 'error'];
+
+export interface MicStatus {
+  state: MicState;
+  error?: string;
+}
+
+/** Reply to mic:info (diagnostics and E2E). */
+export interface MicInfo extends MicStatus {
+  /** Live microphone tracks held by the offscreen document. */
+  liveTracks: number;
+  /** User voice pipelines alive (0 or 1). */
+  pipelines: number;
+  /** Outputs of the analysis node: 0 means the mic has no path to the speakers. */
+  analyserOutputs: number | null;
+  /** Whether anything from the mic graph was ever connected to AudioContext.destination. */
+  reachedDestination: boolean;
+}
+
 export type ExtensionPayload =
   /** SW → offscreen. Reply: CaptureReply. */
   | { type: 'capture:start'; tabId: number; streamId: string }
@@ -38,6 +65,16 @@ export type ExtensionPayload =
   | { type: 'lipsync:frame'; frame: LipSyncFrame }
   /** Offscreen → content over LIPSYNC_PORT. */
   | { type: 'audio:status'; status: AudioStatus }
+  /** SW → offscreen: whether the user wants microphone reactions. Reply: MicStatus once settled. */
+  | { type: 'mic:set'; enabled: boolean }
+  /** SW → offscreen. Reply: MicInfo. */
+  | { type: 'mic:info' }
+  /** Permission page → SW: the extension origin was just granted the microphone. */
+  | { type: 'mic:granted' }
+  /** Offscreen → every enabled tab's content over LIPSYNC_PORT, ~25 per second while the mic is on. */
+  | { type: 'user:frame'; frame: UserVoiceFrame }
+  /** Offscreen → content over LIPSYNC_PORT, on change and to every new port. */
+  | { type: 'user:status'; status: MicStatus }
   /** Content → SW: a failure that doesn't stop the capture (the VRM failed to load, etc.). */
   | { type: 'extension:error'; error: string }
   /**
@@ -75,6 +112,11 @@ const VALIDATORS: Record<MessageType, Validator> = {
     const s = m.status as Record<string, unknown> | null;
     return !!s && typeof s === 'object' && (s.mode === 'amplitude' || s.mode === 'viseme') && typeof s.analyzer === 'string';
   },
+  'mic:set': (m) => typeof m.enabled === 'boolean',
+  'mic:info': () => true,
+  'mic:granted': () => true,
+  'user:frame': (m) => isUserVoiceFrame(m.frame),
+  'user:status': (m) => isMicStatus(m.status),
   'extension:error': (m) => typeof m.error === 'string',
   'debug:analyzer': (m) => m.choice === 'headaudio' || m.choice === 'wlipsync' || m.choice === 'none',
 };
@@ -95,6 +137,12 @@ export function isCaptureReply(raw: unknown): raw is CaptureReply {
   if (!raw || typeof raw !== 'object') return false;
   const r = raw as Record<string, unknown>;
   return r.ok === true || (r.ok === false && typeof r.error === 'string');
+}
+
+export function isMicStatus(raw: unknown): raw is MicStatus {
+  if (!raw || typeof raw !== 'object') return false;
+  const s = raw as Record<string, unknown>;
+  return MIC_STATES.includes(s.state as MicState) && (s.error === undefined || typeof s.error === 'string');
 }
 
 function isTabId(v: unknown): v is number {

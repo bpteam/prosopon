@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Prosopon · microphone</title>
+    <style>
+      body { margin: 0; font: 15px/1.5 system-ui, sans-serif; color: #1d1d1f; background: #f6f6f7; }
+      main { max-width: 34rem; margin: 12vh auto; padding: 0 16px; }
+      h1 { font-size: 1.3rem; }
+      p { color: #444; }
+      #status { font-weight: 600; }
+      @media (prefers-color-scheme: dark) {
+        body { color: #eee; background: #18181a; }
+        p { color: #bbb; }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Microphone reactions</h1>
+      <p>
+        Prosopon listens to your microphone only to tell when you speak and how your voice sounds (level and pitch),
+        so the avatar can react. The audio stays on this device: it is analysed in memory, never recorded, stored or
+        sent anywhere.
+      </p>
+      <p>Chrome asks once for the extension. The toolbar button's menu turns the reactions off again.</p>
+      <p id="status">Waiting for your answer…</p>
+    </main>
+    <script type="module" src="./permission.ts"></script>
+  </body>
+</html>

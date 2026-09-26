@@ -27,6 +27,16 @@ const FIXTURE_CSP = [
   "worker-src 'self'",
 ].join('; ');
 
+export interface ExtensionOptions {
+  /**
+   * WAV played by Chromium's fake microphone (--use-fake-device-for-media-stream). Also grants the extension origin
+   * the microphone, which a real user does once on the permission page. Undefined: no fake mic.
+   */
+  fakeMicWav: string | undefined;
+  /** Grant the microphone up front (what the permission page does once for a real user). Default true. */
+  grantMic: boolean;
+}
+
 export interface ExtensionFixtures {
   context: BrowserContext;
   serviceWorker: Worker;
@@ -35,9 +45,10 @@ export interface ExtensionFixtures {
   chatgpt: Page;
 }
 
-export const test = base.extend<ExtensionFixtures>({
-  // eslint-disable-next-line no-empty-pattern
-  context: async ({}, use) => {
+export const test = base.extend<ExtensionFixtures & ExtensionOptions>({
+  fakeMicWav: [undefined, { option: true }],
+  grantMic: [true, { option: true }],
+  context: async ({ fakeMicWav, grantMic }, use) => {
     if (!existsSync(resolve(EXTENSION_DIR, 'manifest.json'))) {
       throw new Error(`No built extension in ${EXTENSION_DIR}: run "npm run build:dev" first`);
     }
@@ -56,8 +67,18 @@ export const test = base.extend<ExtensionFixtures>({
         '--autoplay-policy=no-user-gesture-required',
         '--use-angle=swiftshader',
         '--enable-unsafe-swiftshader',
+        ...(fakeMicWav
+          ? [
+              // Not --use-fake-ui-for-media-stream: it makes tabCapture's stream id fail ("Requested device not found").
+              '--use-fake-device-for-media-stream',
+              `--use-file-for-fake-audio-capture=${fakeMicWav}%noloop`,
+            ]
+          : []),
       ],
     });
+    // Chromium refuses a grant for the chrome-extension:// origin by name ("opaque origin"); a context-wide grant
+    // covers it. A real user grants it once on the extension's permission page.
+    if (fakeMicWav && grantMic) await context.grantPermissions(['microphone']);
     await context.route('https://chatgpt.com/**', (route) =>
       route.fulfill({ contentType: 'text/html', headers: { 'content-security-policy': FIXTURE_CSP }, body: FIXTURE }),
     );
@@ -95,6 +116,33 @@ interface E2EHook {
   toggle(tabId: number): Promise<void>;
   state(tabId: number): { state: string; error?: string };
   hasOffscreen(): Promise<boolean>;
+  setMic(enabled: boolean, interactive?: boolean): Promise<{ state: string; error?: string } | null>;
+  micInfo(): Promise<MicInfoReply | null>;
+}
+
+export interface MicInfoReply {
+  state: string;
+  error?: string;
+  liveTracks: number;
+  pipelines: number;
+  analyserOutputs: number | null;
+  reachedDestination: boolean;
+}
+
+/** The "Microphone reactions" menu checkbox, through the development-only hook. */
+export function setMic(
+  sw: Worker,
+  enabled: boolean,
+  interactive = false,
+): Promise<{ state: string; error?: string } | null> {
+  return sw.evaluate(
+    ([on, click]) => (globalThis as unknown as { __prosopon: E2EHook }).__prosopon.setMic(on, click),
+    [enabled, interactive] as const,
+  );
+}
+
+export function micInfo(sw: Worker): Promise<MicInfoReply | null> {
+  return sw.evaluate(() => (globalThis as unknown as { __prosopon: E2EHook }).__prosopon.micInfo());
 }
 
 /** The toolbar button, through the development-only hook in the service worker. */

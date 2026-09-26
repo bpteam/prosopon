@@ -121,3 +121,71 @@ describe('lip-sync engine', () => {
     for (const f of files) expect(readFileSync(join(dir, f), 'utf8'), f).not.toMatch(/setState\(/);
   });
 });
+
+// --- US-005: user voice ---------------------------------------------------------------------------------------
+
+const avatarFile = (p: string) => resolve(AVATAR_SRC, p);
+const FORBIDDEN_AVATAR = /avatar\/src\/(avatar\/(Avatar|AvatarController|BehaviorMixer|AvatarLoader)\.ts|renderer\/)/;
+const isThree = (p: string) => p === 'three' || p.startsWith('three/') || p.startsWith('@pixiv/');
+
+describe('user voice analyser', () => {
+  for (const entry of ['audio/user/UserVoiceAnalyzer.ts', 'audio/user/UserVoiceWorklet.ts']) {
+    it(`${entry} does not import Avatar, AvatarController, BehaviorMixer, three or three-vrm`, () => {
+      const { files, packages } = graph(avatarFile(entry));
+      expect([...packages].filter(isThree)).toEqual([]);
+      expect(rel(files).filter((f) => FORBIDDEN_AVATAR.test(f))).toEqual([]);
+    });
+  }
+
+  it('stays separate from the assistant pipeline: the mic pipeline shares no audio code with lip sync', () => {
+    const { files } = graph(resolve(EXT, 'src/offscreen/UserVoicePipeline.ts'));
+    // LipSyncFrame (the transport contract, via messages.ts) is fine; the lip-sync engine is not.
+    expect(rel(files).filter((f) => /AudioInput|LipSync(?!Frame)|analyzers\//.test(f))).toEqual([]);
+  });
+
+  it('never stores audio: no storage APIs where microphone samples exist', () => {
+    const dirs = [resolve(AVATAR_SRC, 'audio/user'), resolve(EXT, 'src/offscreen')];
+    for (const dir of dirs) {
+      for (const file of readdirSync(dir).filter((f) => f.endsWith('.ts'))) {
+        expect(readFileSync(join(dir, file), 'utf8'), file).not.toMatch(/indexedDB|localStorage|sessionStorage|chrome\.storage|showSaveFilePicker|MediaRecorder/);
+      }
+    }
+  });
+});
+
+describe('conversation state ownership', () => {
+  it('ConversationSignalResolver knows AvatarState but not VRM, three.js, bones or expressions', () => {
+    const file = resolve(EXT, 'src/content/ConversationSignalResolver.ts');
+    const { files, packages } = graph(file);
+    expect([...packages].filter(isThree)).toEqual([]);
+    // Type-only imports (AvatarControllerApi, AvatarState) are erased: at runtime it depends on nothing.
+    expect(rel(files)).toEqual(['extension/src/content/ConversationSignalResolver.ts']);
+    expect(rel(files).filter((f) => FORBIDDEN_AVATAR.test(f))).toEqual([]);
+    expect(readFileSync(file, 'utf8')).not.toMatch(/\b(VRM|THREE|bone|Bone|setExpression|expressionManager)\b/);
+  });
+
+  it('only the resolver sets states in the content runtime; the reaction layer never does', () => {
+    for (const f of ['src/content/avatar-runtime.ts', 'src/content/ContentLifecycle.ts', 'src/content/content.ts']) {
+      expect(readFileSync(resolve(EXT, f), 'utf8'), f).not.toMatch(/\.setState\(/);
+    }
+    for (const f of ['avatar/UserReactionMapper.ts', 'avatar/UserReaction.ts']) {
+      expect(readFileSync(avatarFile(f), 'utf8'), f).not.toMatch(/setState\(|setProcedural\(|setBoneRotation\(|setHeadRotation\(/);
+    }
+  });
+});
+
+describe('audio boundary between contexts', () => {
+  it('the message protocol and the frame contract carry no audio types', () => {
+    for (const file of [resolve(EXT, 'src/shared/messages.ts'), avatarFile('audio/user/UserVoiceFrame.ts')]) {
+      const code = readFileSync(file, 'utf8').replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '');
+      expect(code, file).not.toMatch(/\b(Float32Array|ArrayBuffer|MediaStream|AudioNode|AudioBuffer|PCM)\b/);
+    }
+  });
+
+  it('the worklet posts frames only (no samples leave the render thread)', () => {
+    const code = readFileSync(avatarFile('audio/user/UserVoiceWorklet.ts'), 'utf8');
+    const posts = [...code.matchAll(/postMessage\(([^;]*)\)/g)].map((m) => m[1]);
+    expect(posts).toHaveLength(1);
+    expect(posts[0]).toMatch(/type: 'frame', frame: this\.analyzer\.frame\(\)/);
+  });
+});

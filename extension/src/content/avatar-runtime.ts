@@ -5,18 +5,28 @@ import { Avatar } from '@avatar/avatar/Avatar';
 import { AvatarController } from '@avatar/avatar/AvatarController';
 import { AvatarIdleController } from '@avatar/avatar/AvatarIdleController';
 import { AvatarLoader, disposeVRM } from '@avatar/avatar/AvatarLoader';
+import { UserReactionMapper } from '@avatar/avatar/UserReactionMapper';
+import { SILENT_USER_VOICE_FRAME, type UserVoiceFrame } from '@avatar/audio/user/UserVoiceFrame';
 import { MAX_FRAME_DELTA, REST_POSE } from '@avatar/config';
 import { AvatarStage } from '@avatar/renderer/AvatarStage';
 import { RenderLoop } from '@avatar/renderer/RenderLoop';
-import { describeError, type AudioStatus, type ExtensionTabState } from '../shared/messages';
+import { describeError, type AudioStatus, type ExtensionTabState, type MicStatus } from '../shared/messages';
 import { AvatarOverlay } from './AvatarOverlay';
 import { ChatGPTAdapter, type ConversationUiAdapter, type VoiceUiSnapshot } from './ChatGPTAdapter';
-import { VoiceStatePresenter } from './VoiceStatePresenter';
+import { ConversationSignalResolver, type ConversationSignals } from './ConversationSignalResolver';
 
 /**
  * Avatar side of the content script, loaded on activation only (three.js + three-vrm stay off chatgpt.com until
  * the user enables Prosopon). Composes existing Avatar Core parts; the only new pieces are the overlay, the
- * ChatGPT adapter and the presenter that turns voice UI/audio activity into conversation states.
+ * ChatGPT adapter and the resolver that turns voice UI / assistant audio / user voice signals into conversation
+ * states.
+ *
+ * Signals in, one decision out:
+ *   ChatGPTAdapter (voice UI) ─┐
+ *   LipSyncFrame.active ───────┼─► ConversationSignalResolver ─► AvatarController.setState
+ *   UserVoiceFrame.speaking ───┘
+ *   UserVoiceFrame ─► UserReactionMapper ─► (ReactionSource) BehaviorMixer
+ *   LipSyncFrame ─► FrameMouthSource ─► (MouthSource) BehaviorMixer      the mouth follows the assistant only
  */
 
 export interface AvatarRuntimeOptions {
@@ -46,11 +56,35 @@ export interface Diagnostics {
   /** Last frame's per-viseme weights, for spotting a stuck or out-of-range analyser output. */
   visemes: Readonly<MouthShape>;
   volume: number;
+  mic: MicStatus;
+  userVoice: Readonly<UserVoiceFrame>;
+  userFrames: number;
+  conversation: Readonly<ConversationSignals>;
+  resolvedState: string;
+  crosstalkEvents: number;
+  suppressedInterruptions: number;
+  nods: number;
+}
+
+/** Development builds: the same data for DevTools (select the extension's content-script context in the console). */
+export interface ProsoponDebug {
+  diagnostics: Readonly<Diagnostics>;
+  userVoiceFrame: Readonly<UserVoiceFrame>;
+  conversationSignals: Readonly<ConversationSignals>;
+  resolvedState: string;
+}
+
+declare global {
+  interface Window {
+    __PROSOPON_DEBUG__?: ProsoponDebug;
+  }
 }
 
 export interface AvatarRuntimeHandle {
   pushFrame(frame: LipSyncFrame): void;
   setAudioStatus(status: AudioStatus): void;
+  pushUserVoice(frame: UserVoiceFrame): void;
+  setMicStatus(status: MicStatus): void;
   setOffscreenConnected(connected: boolean): void;
   setExtensionState(state: ExtensionTabState, error?: string): void;
   readonly diagnostics: Readonly<Diagnostics>;
@@ -67,11 +101,16 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
   const overlay = new AvatarOverlay(doc, { debug: options.debug });
   const stage = new AvatarStage(overlay.stageContainer);
 
-  // The controller exists before the VRM: states from the presenter set while it loads are kept.
+  // The controller exists before the VRM: states from the resolver set while it loads are kept.
   const controller = new AvatarController({ idle: new AvatarIdleController() });
   const mouth = new FrameMouthSource();
   controller.setMouthSource(mouth);
-  const presenter = new VoiceStatePresenter(controller);
+  const reaction = new UserReactionMapper();
+  controller.setReactionSource(reaction);
+  const resolver = new ConversationSignalResolver(controller);
+  /** Seconds since the last user voice frame; the user is not speaking once frames stop. */
+  let userFrameAge = Infinity;
+  const USER_FRAME_STALE = 0.5;
 
   const diag: Diagnostics = {
     extensionState: 'enabled',
@@ -88,7 +127,37 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
     frameHz: 0,
     visemes: CLOSED_MOUTH,
     volume: 0,
+    mic: { state: 'off' },
+    userVoice: SILENT_USER_VOICE_FRAME,
+    userFrames: 0,
+    conversation: resolver.signals,
+    resolvedState: resolver.resolved,
+    crosstalkEvents: 0,
+    suppressedInterruptions: 0,
+    nods: 0,
   };
+  const resetUserVoice = () => {
+    diag.userVoice = SILENT_USER_VOICE_FRAME;
+    userFrameAge = Infinity;
+    reaction.reset();
+    resolver.setUserSpeaking(false);
+  };
+  if (options.debug) {
+    window.__PROSOPON_DEBUG__ = {
+      get diagnostics() {
+        return diag;
+      },
+      get userVoiceFrame() {
+        return diag.userVoice;
+      },
+      get conversationSignals() {
+        return resolver.signals;
+      },
+      get resolvedState() {
+        return resolver.resolved;
+      },
+    };
+  }
   let mouthPeak = 0;
   // Frame-rate window: frames counted at the previous diagnostics render, and when that was.
   let rateMark = { frames: 0, time: 0 };
@@ -100,7 +169,7 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
     // Worst case (selectors outdated): no orb found, ChatGPT's orb stays visible next to the avatar.
     if (ui.orb) restoreOrb = adapter.hideVisually(ui.orb);
     overlay.setAnchor(ui.orb ?? ui.container);
-    presenter.setVoiceUiActive(ui.active);
+    resolver.setVoiceUiActive(ui.active);
     diag.voiceUi = ui.active;
     diag.orbHidden = restoreOrb !== null;
   };
@@ -108,7 +177,11 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
 
   let sinceDebug = Infinity;
   const loop = new RenderLoop((delta) => {
-    presenter.update(delta);
+    userFrameAge += delta;
+    if (userFrameAge > USER_FRAME_STALE && resolver.signals.userSpeaking) resolver.setUserSpeaking(false);
+    resolver.update(delta);
+    // The mic hears the speakers when echo cancellation falls short: no reactions while the assistant talks.
+    reaction.setSuppressed(resolver.signals.assistantSpeaking);
     controller.update(delta);
     stage.render();
     const m = mouth.value;
@@ -170,6 +243,23 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
     d.visemes = VISEMES.map((v) => `${v}:${diag.visemes[v].toFixed(2)}`).join(' ');
     d.mouthPeak = mouthPeak.toFixed(3);
     d.avatarState = controller.getState();
+    const u = diag.userVoice;
+    const conv = resolver.diagnostics;
+    diag.conversation = conv.signals;
+    diag.resolvedState = conv.resolved;
+    diag.crosstalkEvents = conv.crosstalkEvents;
+    diag.suppressedInterruptions = conv.suppressedInterruptions;
+    diag.nods = reaction.nods;
+    d.mic = diag.mic.state;
+    d.userSpeaking = String(conv.signals.userSpeaking);
+    d.assistantSpeaking = String(conv.signals.assistantSpeaking);
+    d.resolvedState = conv.resolved;
+    d.userFrames = String(diag.userFrames);
+    d.userEnergy = u.energy.toFixed(3);
+    d.userPitch = u.pitchHz === null ? 'null' : u.pitchHz.toFixed(1);
+    d.crosstalk = String(conv.crosstalkEvents);
+    d.nods = String(reaction.nods);
+    const r = reaction.value;
     overlay.setDebugText(
       [
         `extension   ${diag.extensionState}${diag.extensionError ? ` (${diag.extensionError})` : ''}`,
@@ -180,6 +270,15 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
       `visemes     ${VISEMES.map((v) => `${v} ${diag.visemes[v].toFixed(2)}`).join('  ')}`,
         `avatar      ${diag.avatarLoaded === true ? 'loaded' : diag.avatarLoaded === 'error' ? `error: ${diag.avatarError}` : 'loading'} · ${controller.getState()}`,
         `voice UI    ${diag.voiceUi ? 'detected' : 'not found'}${diag.orbHidden ? ' · orb hidden' : ''}`,
+        '— User Voice',
+        `mic         ${diag.mic.state === 'off' ? 'Microphone reactions: OFF' : `Microphone reactions: ON · ${diag.mic.state}`}${diag.mic.error ? ` (${diag.mic.error})` : ''}`,
+        `speaking    ${u.speaking ? 'yes' : 'no'} · segment ${u.segmentDuration.toFixed(2)} s · ${diag.userFrames} frames`,
+        `level       ${u.rmsDb.toFixed(1)} dBFS · floor ${u.noiseFloorDb.toFixed(1)} · energy ${u.energy.toFixed(2)}`,
+        `pitch       ${u.pitchHz === null ? '—' : `${u.pitchHz.toFixed(0)} Hz`} · conf ${u.pitchConfidence.toFixed(2)} · rel ${u.relativePitch.toFixed(1)} st · var ${u.pitchVariation.toFixed(1)} st`,
+        `reaction    engagement ${r.engagement.toFixed(2)} · lift ${r.pitchLift.toFixed(2)} · nods ${reaction.nods}`,
+        '— Conversation',
+        `signals     voice UI ${conv.signals.voiceUiActive ? 'on' : 'off'} · user ${conv.signals.userSpeaking ? 'speaking' : '—'} · assistant ${conv.signals.assistantSpeaking ? 'speaking' : '—'}`,
+        `resolved    ${conv.resolved}${conv.crosstalk ? ' · CROSSTALK' : ''} · crosstalk ${conv.crosstalkEvents} · ignored ${conv.suppressedInterruptions}`,
       ].join('\n'),
     );
   }
@@ -193,19 +292,34 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
       mouth.push(frame);
       if (frame.active !== diag.audioActive) {
         diag.audioActive = frame.active;
-        presenter.setAudioActive(frame.active);
+        resolver.setAssistantAudioActive(frame.active);
       }
     },
     setAudioStatus(status) {
       diag.lipSyncMode = status.mode;
       diag.analyzer = status.analyzer;
     },
+    pushUserVoice(frame) {
+      // Frames can arrive after the user turned reactions off (in flight): only an 'on' mic drives anything.
+      if (diag.mic.state !== 'on') return;
+      diag.userFrames++;
+      diag.userVoice = frame;
+      userFrameAge = 0;
+      reaction.push(frame);
+      resolver.setUserSpeaking(frame.speaking, frame.segmentDuration);
+    },
+    setMicStatus(status) {
+      diag.mic = status;
+      if (status.state !== 'on') resetUserVoice();
+    },
     setOffscreenConnected(connected) {
       diag.offscreenConnected = connected;
       if (!connected) {
         mouth.reset();
         diag.audioActive = false;
-        presenter.setAudioActive(false);
+        resolver.setAssistantAudioActive(false);
+        diag.mic = { state: 'off' };
+        resetUserVoice();
       }
     },
     setExtensionState(state, error) {
@@ -217,6 +331,7 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
       disposed = true;
       loop.stop();
       stopObserving();
+      if (window.__PROSOPON_DEBUG__?.diagnostics === diag) delete window.__PROSOPON_DEBUG__;
       restoreOrb?.();
       restoreOrb = null;
       controller.dispose();

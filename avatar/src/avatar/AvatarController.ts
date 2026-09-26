@@ -5,8 +5,10 @@ import { AvatarIdleController } from './AvatarIdleController';
 import type { AvatarState, AvatarStateProfile } from './AvatarStateProfiles';
 import { BehaviorMixer } from './BehaviorMixer';
 import { ConversationStateMachine, type ConversationStateMachineOptions } from './ConversationStateMachine';
+import { NEUTRAL_REACTION, type ReactionSource } from './UserReaction';
 
 export type { MouthSource } from './MouthShape';
+export type { ReactionSource } from './UserReaction';
 
 export type StateChangeListener = (state: AvatarState, previous: AvatarState) => void;
 
@@ -20,6 +22,7 @@ export interface AvatarControllerApi {
   setLookAtTarget(target: THREE.Object3D | null): void;
   setIdleEnabled(enabled: boolean): void;
   setMouthSource(source: MouthSource | null): void;
+  setReactionSource(source: ReactionSource | null): void;
 
   update(deltaTime: number): void;
 }
@@ -55,6 +58,7 @@ export class AvatarController implements AvatarControllerApi {
   private readonly listeners = new Set<StateChangeListener>();
   private readonly onListenerError: (error: unknown) => void;
   private mouthSource: MouthSource | null = null;
+  private reactionSource: ReactionSource | null = null;
 
   constructor(options: AvatarControllerOptions) {
     this.idle = options.idle ?? new AvatarIdleController();
@@ -164,13 +168,24 @@ export class AvatarController implements AvatarControllerApi {
     this.mouthSource = source;
   }
 
+  // --- User reaction -------------------------------------------------------
+
+  /**
+   * Source of reactions to the user's voice (attentiveness, nod). Mixed by BehaviorMixer like every other source;
+   * it never writes bones itself and never changes the conversation state.
+   */
+  setReactionSource(source: ReactionSource | null): void {
+    this.reactionSource = source;
+  }
+
   // --- Frame -----------------------------------------------------------------
 
   update(deltaTime: number): void {
     const profile = this.machine.update(deltaTime);
     const idlePose = this.idle.update(deltaTime);
     const mouth = this.mouthSource?.update(deltaTime) ?? CLOSED_MOUTH;
-    const pose = this.mixer.compose(idlePose, profile, mouth);
+    const reaction = this.reactionSource?.update(deltaTime) ?? NEUTRAL_REACTION;
+    const pose = this.mixer.compose(idlePose, profile, mouth, reaction);
     if (!this.current) return;
     this.current.setProcedural(pose);
     this.current.update(deltaTime);

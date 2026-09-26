@@ -1,11 +1,12 @@
 import { EMPTY_PROCEDURAL_POSE, type MouthShape, type ProceduralPose } from './Avatar';
 import type { AvatarStateProfile } from './AvatarStateProfiles';
+import { NEUTRAL_REACTION, REACTION_LIMITS, type UserReactionFrame } from './UserReaction';
 
 /**
  * The single place where behaviour sources are merged into the one ProceduralPose that Avatar receives.
  *
- * Current sources: idle (base signal), conversation state (scales and biases it) and mouth (lip sync).
- * Future sources (emotion → expressions/posture, gestures) are added here as further
+ * Current sources: idle (base signal), conversation state (scales and biases it), mouth (lip sync) and the user
+ * reaction (small, bounded modulation from the user's voice, including the nod). Future sources (emotion → expressions/posture, gestures) are added here as further
  * inputs of compose(), never as additional writers of Avatar.setProcedural().
  */
 export class BehaviorMixer {
@@ -16,25 +17,35 @@ export class BehaviorMixer {
     return this.out;
   }
 
-  /** @param mouth lip sync output: openness on "aa", or a weight per viseme preset */
+  /**
+   * @param mouth lip sync output: openness on "aa", or a weight per viseme preset
+   * @param reaction user reaction; clamped here, so no source can exceed REACTION_LIMITS
+   */
   compose(
     idle: Readonly<ProceduralPose>,
     state: Readonly<AvatarStateProfile>,
     mouth: number | Readonly<MouthShape> = 0,
+    reaction: Readonly<UserReactionFrame> = NEUTRAL_REACTION,
   ): Readonly<ProceduralPose> {
     const o = this.out;
-    const head = state.headMotionMultiplier;
+    const engagement = clamp(reaction.engagement, 0, 1);
+    const lift = clamp(reaction.pitchLift, 0, 1);
+    const nod = clamp(reaction.nod, 0, 1);
+
+    const head = state.headMotionMultiplier * (1 + REACTION_LIMITS.headMotionGain * engagement);
     o.headYaw = idle.headYaw * head + state.headYawOffset;
-    o.headPitch = idle.headPitch * head + state.headPitchOffset;
+    // Pitch > 0 is chin down: the nod dips, a raised voice lifts the chin a touch.
+    o.headPitch =
+      idle.headPitch * head + state.headPitchOffset + REACTION_LIMITS.nod * nod - REACTION_LIMITS.pitchLift * lift;
     o.headRoll = idle.headRoll * head + state.headRollOffset;
 
     o.breath = idle.breath * state.breathingMultiplier;
-    o.lean = idle.lean + state.leanOffset;
+    o.lean = idle.lean + state.leanOffset + REACTION_LIMITS.lean * engagement;
 
     // Blink is owned by idle; state never modulates it, so a state switch cannot interrupt a blink.
     o.blink = idle.blink;
 
-    const gaze = state.gazeMotionMultiplier;
+    const gaze = state.gazeMotionMultiplier * (1 - REACTION_LIMITS.gazeSteadyGain * engagement);
     o.gazeYaw = idle.gazeYaw * gaze + state.gazeYawOffset;
     o.gazePitch = idle.gazePitch * gaze + state.gazePitchOffset;
 
@@ -51,4 +62,8 @@ export class BehaviorMixer {
     }
     return o;
   }
+}
+
+function clamp(v: number, min: number, max: number): number {
+  return Number.isFinite(v) ? (v < min ? min : v > max ? max : v) : 0;
 }

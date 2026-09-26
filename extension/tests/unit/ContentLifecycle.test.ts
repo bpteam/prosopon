@@ -10,6 +10,8 @@ function fakeRuntime(): AvatarRuntimeHandle & { frames: unknown[]; disposed: num
     diagnostics: {} as AvatarRuntimeHandle['diagnostics'],
     pushFrame: (f: unknown) => void r.frames.push(f),
     setAudioStatus: vi.fn(),
+    pushUserVoice: vi.fn(),
+    setMicStatus: vi.fn(),
     setOffscreenConnected: vi.fn(),
     setExtensionState: vi.fn(),
     dispose: () => void r.disposed++,
