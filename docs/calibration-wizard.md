@@ -13,34 +13,24 @@ Architecture and privacy rules: [../PRODUCT.md](../PRODUCT.md) (invariants 5, 14
 ## Before you start
 
 - Chrome with Prosopon, the avatar on in a ChatGPT tab, Developer mode on.
-- **Headphones.** ChatGPT Voice hears your speakers; the wizard mutes ChatGPT's microphone during scripted steps,
-  but interruption steps need it on.
-- Microphone reactions allowed (the wizard turns them on; without them the user steps are marked invalid).
+- Start a ChatGPT Voice conversation yourself and leave it open. The wizard does not touch Voice controls,
+  microphone controls or your chat setup.
 - Choose the languages in the Calibration panel before **Start**. Russian is selected by default; only selected
   languages create assistant, user and interruption steps. A four-language run takes about 12–14 minutes.
   ChatGPT Voice usage limits apply.
 
 ## What a run does
 
-1. Preflight: tab capture running, microphone on (auto-fix), config snapshot, offscreen recorder session.
-2. Environment: voice name and mode from the page (`detectVoiceEnvironment`); unknown → a voice picker.
+1. Preflight: tab capture running, config snapshot, offscreen recorder session.
+2. Environment: voice name and mode from the page (`detectVoiceEnvironment`); an unknown voice name is recorded as
+   unknown and does not pause the run.
 3. The wizard leaves the current chat, route and page untouched: it never creates a chat, clears its messages,
    refreshes the page or sends a setup prompt. Prepare the conversation context yourself.
-4. You start ChatGPT Voice yourself, then press **Start calibration**. The wizard never clicks ChatGPT's Voice
-   control or accepts its permission UI. It waits for Voice controls, mutes ChatGPT's microphone, then waits for
-   1.2 s of quiet. This drains Voice's startup chime before any sample is armed. If Voice closes later, reopen it
-   yourself and the run resumes.
-5. Per language RU → UK → EN → ES: each assistant sample is a prompt typed into the composer asking ChatGPT to say a
-   composite sentence verbatim; Prosopon accepts it only after sustained assistant audio *and* a new rendered
-   assistant turn. A chime, tab noise, a closed Voice session, crosstalk from the user mic, or audio without a new
-   turn is invalid rather than a sample. The Voice session closing ends the wait immediately. Retry once, then the
-   sample is invalid and the run continues. Three silent samples in a row stop the assistant part (the typed-prompt
-   path doesn't work in this voice session).
-6. User steps: the wizard shows a phrase, VAD detects start and end, then the avatar's reaction window.
-7. Interruptions: ChatGPT is asked for a long answer, a 3-2-1 countdown, **SPEAK NOW**, then onset, state change and
-   gesture cancellation are measured.
-8. Analysis (local rules, no LLM): a verdict per sample, a summary per language, measured chars/s.
-9. Export: the ZIP is built in the offscreen document; an extension page downloads it. **Discard** (in the
+4. Per selected language, the wizard inserts one requested phrase into the composer and presses **Enter**. It waits
+   for assistant tab audio to start and finish, then saves that step's audio clip, trace, rendered reply text and
+   behaviour events before sending the next phrase. It does not click other page controls.
+5. Analysis (local rules, no LLM): a verdict per sample, a summary per language, measured chars/s.
+6. Export: the ZIP is built in the offscreen document; an extension page downloads it. **Discard** (in the
    wizard or on the export page), turning Developer mode off or turning the avatar off for the tab deletes the
    recordings and the bundle; until then they stay in memory only.
 
@@ -66,8 +56,8 @@ waits for it.
 | `AGENT_TASK.md` | ready task for the next coding agent |
 
 Verdicts (`VERDICTS` in `analysis.ts`) include `GESTURE_POLICY_SUPPRESSION`, `MIX_OR_AMPLITUDE_TOO_LOW`,
-`GESTURE_CLAMPED`, `SEMANTIC_MISS`, `PACING_DROP`, `VAD_MISSED`, `INTERRUPTION_SLOW`, … ; audio without a rendered
-turn is `INVALID_SAMPLE` with `assistant-audio-without-reply-text`.
+`GESTURE_CLAMPED`, `SEMANTIC_MISS`, `PACING_DROP`, `NO_REPLY_TEXT`, … ; reply text is diagnostic data and does not
+block an otherwise recorded audio sample.
 `REPORT.md` explains the ones found, `AGENT_TASK.md` lists all of them.
 
 Development builds accept a smaller run for the next Start:
@@ -83,24 +73,16 @@ document.dispatchEvent(new CustomEvent('prosopon:calibration', {
 The E2E test (`extension/tests/e2e/calibration.spec.ts`) runs the whole flow on the fixture page only. Everything
 below is **unverified against production** and must be checked in a real browser session, in this order:
 
-1. **Typed prompt during Voice** (the main risk). With a voice session open, does a message sent from the composer
+1. **Enter during Voice** (the main risk). With a voice session open, does a phrase inserted into the composer and
+   sent with **Enter**
    get a *spoken* answer? If ChatGPT only answers in text, every assistant sample is invalid and the run says so
    after three silent samples. There is no read-aloud fallback.
-2. **Reply text in voice mode.** Is the spoken reply rendered in the thread while it is spoken? The wizard now rejects
-   audio without a new rendered assistant turn, because it cannot distinguish it safely from startup/tab audio.
-3. **Selectors** (`CHATGPT_SELECTORS`, all guesses except the orb and the assistant message):
+2. **Reply text in voice mode.** Is the spoken reply rendered in the thread while it is spoken? It is saved when
+   present; the audio sample remains valid without it.
+3. **Composer selector** (`CHATGPT_SELECTORS`):
    - composer `#prompt-textarea` or `contenteditable[role=textbox]` — typing through `execCommand('insertText')`;
-   - send `[data-testid="send-button"]` / `#composer-submit-button`, otherwise native composer form submission;
-   - start voice `[data-testid="composer-speech-button"]`, English fallback *Start voice mode*, and the observed
-     Ukrainian fallback *Почати голосову розмову*;
-   - mute English controls or observed Ukrainian *Вимкнути/Увімкнути мікрофон*; the resulting state is confirmed,
-     not just clicked;
-   - the selected voice: a checked `menuitemradio`/`radio`/`option` with a known name, an `aria-label`/`title` like
-     *Voice: Sol*, or a page `localStorage` key containing `voice`. Otherwise the picker appears (expected).
-4. **Mute** actually stops ChatGPT from hearing you during scripted and user steps, and is restored at the end.
-5. **Headphones vs speakers**: on speakers ChatGPT may interrupt itself; note it in the flags.
-6. **Voice limits**: a run of this length may hit ChatGPT Voice limits or a session timeout; the wizard shows
-   *[Resume Voice]* when the session closes.
+4. **Voice limits:** a session ending or a silence longer than the configured response timeout invalidates that
+   sample; prepare Voice again before starting another run.
 
 Report selector fixes in `ChatGPTAdapter` and the fixture (`tests/e2e/fixtures/chatgpt.html`) together.
 

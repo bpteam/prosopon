@@ -7,13 +7,11 @@ import { createWorld, type WorldOptions } from './calibrationFakes';
 
 async function runAll(world: ReturnType<typeof createWorld>, runner: CalibrationRunner, maxMinutes = 60) {
   let spokeFor: unknown = null;
+  await world.chat.startVoice();
   const done = runner.start();
   let finished = false;
   void done.then(() => (finished = true));
   const onFrame = () => {
-    // Voice is a deliberate user action in production; this fake user opens it when the wizard asks.
-    if (runner.view.phase === 'paused' && runner.view.action?.id === 'open-voice') void world.chat.startVoice();
-    if (runner.view.phase === 'paused' && runner.view.action?.id === 'resume-voice') void world.chat.startVoice();
     const p = runner.view.prompt;
     if (p?.speakNow && !p.listening && !world.userSpeaking && spokeFor !== p) {
       spokeFor = p;
@@ -53,9 +51,8 @@ describe('CalibrationRunner', () => {
     // Each step recorded its own audio clip(s) in the offscreen document.
     const starts = world.requests.filter((r) => r.type === 'calibration:record' && r.action === 'start');
     expect(starts.length).toBeGreaterThanOrEqual(runner.scenario.steps.length);
-    // ChatGPT's mic: muted for the scripted part, unmuted around interruptions, restored at the end.
-    expect(world.muteCalls[0]).toBe(true);
-    expect(world.muteCalls.at(-1)).toBe(false);
+    // The simple flow never touches ChatGPT's Voice or microphone controls.
+    expect(world.muteCalls).toEqual([]);
   }, 60_000);
 
   it('measures the speech rate and finds the expected cues end to end', async () => {
@@ -83,14 +80,13 @@ describe('CalibrationRunner', () => {
     expect(runner.result!.results[0]!.verdicts[0]).toMatchObject({ verdict: 'GESTURE_POLICY_SUPPRESSION', detail: 'cooldown' });
   }, 60_000);
 
-  it('does not accept audio without a new reply turn: a startup sound must not become a calibration sample', async () => {
+  it('keeps a usable audio sample when the page does not render reply text', async () => {
     const { world, runner } = setup({ renderText: false }, buildScenario({ languages: ['en'], user: false, categories: ['question.normal'] }));
     await runAll(world, runner);
     const r = runner.result!.results[0]!;
-    expect(r.valid).toBe(false);
+    expect(r.valid).toBe(true);
     expect(r.textSource).toBe('none');
-    expect(r.invalidReason).toBe('assistant-audio-without-reply-text');
-    expect(r.verdicts[0]!.verdict).toBe('INVALID_SAMPLE');
+    expect(r.verdicts[0]!.verdict).toBe('NO_REPLY_TEXT');
   }, 60_000);
 
   it('retries once, marks the sample invalid and stops sending prompts when Voice never speaks typed messages', async () => {
@@ -105,25 +101,20 @@ describe('CalibrationRunner', () => {
     expect(prompts).toBe(6); // three samples × two attempts, then the rest is skipped
   }, 60_000);
 
-  it('asks for the voice only when it cannot be detected, and continues', async () => {
+  it('keeps an unknown Voice name rather than interrupting the run for a manual picker', async () => {
     const { world, runner } = setup({ voice: null }, buildScenario({ languages: ['en'], user: false, categories: ['question.normal'] }));
     await runAll(world, runner);
     const manifest = JSON.parse(runner.bundleFiles!.get('manifest.json')!);
-    expect(manifest.chatgpt.voice).toBe('Cove');
+    expect(manifest.chatgpt.voice).toBeNull();
     expect(manifest.chatgpt.voiceDetection).toBe('unknown');
   }, 60_000);
 
-  it('waits for the user to open Voice and resumes once the session is present', async () => {
+  it('fails immediately when Voice was not prepared before Start', async () => {
     const { world, runner } = setup({ voiceStarts: false }, buildScenario({ languages: ['en'], user: false, categories: ['question.normal'] }));
     void runner.start();
     await world.advance(3000, (dt) => runner.tick(dt));
-    expect(runner.view.phase).toBe('paused');
-    expect(runner.view.action).toMatchObject({ id: 'open-voice', label: 'Open Voice' });
-    // The user opens Voice by hand; the wizard notices by itself.
-    await world.chat.startVoice();
-    (world.chat as unknown as { isVoiceModeActive: () => boolean }).isVoiceModeActive = () => true;
-    await world.advance(1000, (dt) => runner.tick(dt));
-    expect(runner.view.phase).not.toBe('paused');
+    expect(runner.view.phase).toBe('failed');
+    expect(runner.view.error).toMatch(/Open ChatGPT Voice/);
   }, 60_000);
 
   it('skips user and interruption samples without a microphone instead of stopping', async () => {
@@ -150,7 +141,7 @@ describe('CalibrationRunner', () => {
     void runner.start();
     for (let i = 0; i < 60 && runner.view.phase !== 'complete'; i++) {
       await world.advance(1000, (dt) => runner.tick(dt), () => {
-        if (runner.view.phase === 'paused' && runner.view.action?.id === 'open-voice') void world.chat.startVoice();
+        if (runner.view.phase === 'preflight') void world.chat.startVoice();
         if (!flagged && runner.view.flaggable) {
           flagged = true;
           runner.flag();

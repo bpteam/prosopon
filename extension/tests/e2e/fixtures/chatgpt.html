@@ -34,6 +34,9 @@
       const composer = document.getElementById('prompt-textarea');
       const send = document.getElementById('send');
       composer.addEventListener('input', () => (send.disabled = composer.value.trim() === ''));
+      composer.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' && !send.disabled) document.getElementById('composer').requestSubmit();
+      });
       document.getElementById('composer').addEventListener('submit', (event) => {
         event.preventDefault();
         if (send.disabled) return;

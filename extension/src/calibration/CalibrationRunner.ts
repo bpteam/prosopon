@@ -9,11 +9,10 @@ import { CALIBRATION_FILE_CHUNK, type CalibrationReply } from '../shared/message
 /**
  * Phases of the calibration state machine:
  *
- *   idle → preflight → detect-environment → start-voice → (pick-voice) →
- *   assistant-<lang>… → user-<lang>… → interruption → analyse → complete → exporting → exported
+ *   idle → preflight → detect-environment → assistant-<lang>… → analyse → complete → exporting → exported
  *
- * `paused` waits for the one thing only the user can do (open Voice, pick the voice); the run then continues from
- * the current step. Nothing but Start, those fallbacks, the optional "visually wrong" flag and Export needs the user.
+ * The user prepares ChatGPT Voice before Start. The runner only sends one calibration prompt at a time, waits for
+ * its tab audio to end, records the resulting trace, then sends the next prompt.
  */
 export type CalibrationPhase =
   | 'idle'
@@ -91,12 +90,6 @@ export const DEFAULT_TIMING = Object.freeze({
   countdown: 3,
   interruptOnset: 8,
   voiceStart: 12,
-  /** Voice controls must be mounted and tab audio quiet before the first scripted prompt is armed. */
-  voiceReady: 10,
-  voiceQuiet: 1.2,
-  /** A click/chime is not a reply: assistant audio must remain present this long. */
-  assistantMinSpeech: 0.7,
-  micOn: 10,
 });
 
 const MIC_UNAVAILABLE = 'microphone reactions are not on';
@@ -112,8 +105,6 @@ export class CalibrationRunner {
   private trace: CalibrationTrace | null = null;
   private listeners = new Set<(view: CalibrationView) => void>();
   private current: StepRecord | null = null;
-  private pressed: CalibrationActionId | null = null;
-  private pickedVoice: string | null = null;
   private muted = false;
   private analysis: CalibrationAnalysis | null = null;
   private files: Map<string, string> | null = null;
@@ -173,14 +164,9 @@ export class CalibrationRunner {
   }
 
   /** The user pressed the fallback button. */
-  act(id: CalibrationActionId): void {
-    this.pressed = id;
-  }
+  act(_id: CalibrationActionId): void {}
 
-  pickVoice(name: string): void {
-    const v = name.trim().slice(0, 40);
-    if (v) this.pickedVoice = v;
-  }
+  pickVoice(_name: string): void {}
 
   /** "Mark this as visually wrong" (optional; the run never waits for it). A reason refines the last flag. */
   flag(reason: StepRecord['manualFlags'][number]['reason'] = 'unspecified'): void {
@@ -234,20 +220,11 @@ export class CalibrationRunner {
     this.set({ phase: 'detect-environment', label: 'detect-environment', message: 'Detecting the ChatGPT voice…' });
     this.detectEnvironment();
 
-    this.set({ phase: 'start-voice', label: 'start-voice', message: 'Starting ChatGPT Voice…' });
-    await this.ensureVoice(true);
     this.detectEnvironment();
-    if (!this.env.voiceName) await this.askVoice();
-    // ChatGPT's own microphone stays muted while the wizard talks to it and while you speak test phrases, so neither
-    // your room nor your phrases interrupt or prompt it. Interruption tests unmute it.
-    this.muted = await this.host.chat.setVoiceMicMuted(true).catch(() => false);
-    if (!this.muted) throw new Error("Couldn't mute ChatGPT's microphone. Calibration would be contaminated by room speech.");
-    this.trace.event('recovery', { chatgptMicMuted: this.muted });
-    await this.waitForVoiceToSettle();
+    if (!this.host.chat.isVoiceModeActive()) throw new Error('Open ChatGPT Voice before pressing Start calibration.');
 
     for (const step of this.scenario.steps) await this.runStep(step);
 
-    if (this.muted) await this.host.chat.setVoiceMicMuted(false).catch(() => false);
     this.set({ phase: 'analyse', label: 'analyse', message: 'Analysing…', prompt: null, flaggable: false });
     this.finishTrace();
     this.analyse();
@@ -262,12 +239,6 @@ export class CalibrationRunner {
     this.offscreenInfo = begin.data ?? {};
     if (!this.offscreenInfo.assistantSampleRate) throw new Error('Tab audio capture is not running. Turn the avatar off and on again, then retry.');
     this.updateEnvironmentView();
-    if (this.host.environment().mic.state !== 'on') {
-      // Automatic fix: the same switch as the popup's "Microphone reactions". Without it the user steps are skipped.
-      await this.host.requestMicReactions().catch(() => undefined);
-      await this.clock.until(() => this.host.environment().mic.state === 'on', this.timing.micOn);
-      this.updateEnvironmentView();
-    }
   }
 
   private detectEnvironment(): void {
@@ -277,69 +248,9 @@ export class CalibrationRunner {
     this.updateEnvironmentView();
   }
 
-  private async askVoice(): Promise<void> {
-    this.pickedVoice = null;
-    this.set({
-      phase: 'pick-voice',
-      message: "I couldn't detect the selected ChatGPT voice. Select it:",
-      voicePicker: { options: this.host.chat.knownVoices },
-    });
-    await this.clock.until(() => this.pickedVoice !== null, Number.POSITIVE_INFINITY);
-    this.env = { ...this.env, voiceName: this.pickedVoice, detectedFrom: 'unknown' };
-    this.trace?.event('recovery', { voicePickedManually: this.pickedVoice });
-    this.set({ voicePicker: null });
-    this.updateEnvironmentView();
-  }
-
-  /** Voice is deliberately a user action: the wizard never opens a Voice session or accepts its permission UI. */
-  private async ensureVoice(first = false): Promise<void> {
-    const chat = this.host.chat;
-    if (chat.isVoiceModeActive()) {
-      await this.waitForVoiceReady();
-      return;
-    }
-    if (!first) this.trace?.event('recovery', { voiceClosed: true });
-    const phase = this.stateView.phase;
-    await this.waitForUser(
-      first
-        ? { id: 'open-voice', label: 'Open Voice', text: 'Start ChatGPT Voice yourself, then return here.' }
-        : { id: 'resume-voice', label: 'Resume Voice', text: 'ChatGPT Voice closed. Open it yourself to continue.' },
-      () => chat.isVoiceModeActive(),
-      async () => chat.isVoiceModeActive(),
-    );
-    this.set({ phase });
-    if (!first && this.muted) await chat.setVoiceMicMuted(true).catch(() => false);
-    await this.waitForVoiceReady();
-  }
-
-  private async waitForVoiceReady(): Promise<void> {
-    const ready = await this.clock.until(() => this.host.chat.isVoiceReady(), this.timing.voiceReady);
-    if (!ready) throw new Error("ChatGPT Voice opened, but its controls did not become ready.");
-  }
-
-  /** Drains the Voice startup chime before an assistant sample can be armed. */
-  private async waitForVoiceToSettle(): Promise<void> {
-    const quiet = await this.clock.held(
-      () => this.host.chat.isVoiceReady() && !this.frame().signals.assistantSpeaking,
-      this.timing.voiceQuiet,
-      this.timing.voiceReady,
-    );
-    if (!quiet) throw new Error('ChatGPT Voice did not become quiet after startup. Restart Voice and try again.');
-  }
-
-  /** Pause until `done()` holds, retrying `attempt` whenever the user presses the action. */
-  private async waitForUser(action: NonNullable<CalibrationView['action']>, done: () => boolean, attempt: () => Promise<boolean>): Promise<void> {
-    const phase = this.stateView.phase;
-    this.set({ phase: 'paused', action, message: action.text });
-    this.pressed = null;
-    while (!done()) {
-      await this.clock.until(() => done() || this.pressed === action.id, Number.POSITIVE_INFINITY);
-      if (this.pressed === action.id) {
-        this.pressed = null;
-        if (await attempt().catch(() => false)) break;
-      }
-    }
-    this.set({ phase, action: null });
+  /** The simple calibration flow never opens or recovers Voice; the user owns that environment. */
+  private async ensureVoice(): Promise<void> {
+    if (!this.host.chat.isVoiceModeActive()) throw new Error('ChatGPT Voice closed during calibration. Stop and prepare the environment again.');
   }
 
   private async runStep(step: CalibrationStep): Promise<void> {
@@ -414,10 +325,8 @@ export class CalibrationRunner {
   /** Sends the step's prompt, records the spoken reply until it ends and the gesture settles. */
   private async speakPrompt(step: CalibrationStep, rec: StepRecord, clipId: string): Promise<'ok' | 'failed'> {
     const chat = this.host.chat;
-    await this.ensureVoice();
     await this.clock.held(() => !this.frame().signals.assistantSpeaking, this.timing.quietBeforePrompt, 20);
     const before = chat.countAssistantMessages();
-    const crosstalkBefore = this.frame().crosstalkEvents;
     await this.clip(rec, clipId, 'assistant', 'start');
     try {
       if (!(await chat.sendMessage(step.prompt!))) {
@@ -425,23 +334,13 @@ export class CalibrationRunner {
         return 'failed';
       }
       this.trace!.event('prompt-sent', { chars: step.prompt!.length });
-      const onset = await this.clock.until(() => this.frame().signals.assistantSpeaking || !chat.isVoiceModeActive(), this.timing.assistantStart);
-      const started = onset && chat.isVoiceModeActive() && (await this.clock.held(() => this.frame().signals.assistantSpeaking, this.timing.assistantMinSpeech, this.timing.assistantStart));
-      if (!started || !chat.isVoiceModeActive() || !this.frame().signals.assistantSpeaking) {
-        rec.invalidReason = !chat.isVoiceModeActive() ? 'voice-session-ended' : chat.countAssistantMessages() > before ? 'no-assistant-audio' : 'assistant-did-not-answer';
+      if (!(await this.clock.until(() => this.frame().signals.assistantSpeaking, this.timing.assistantStart))) {
+        rec.invalidReason = chat.countAssistantMessages() > before ? 'no-assistant-audio' : 'assistant-did-not-answer';
         this.captureText(rec, before);
         return 'failed';
       }
       await this.clock.held(() => !this.frame().signals.assistantSpeaking, this.timing.assistantEndSilence, this.timing.assistantMaxTurn);
-      if (this.frame().crosstalkEvents > crosstalkBefore) {
-        rec.invalidReason = 'external-voice-during-assistant-sample';
-        return 'failed';
-      }
       await this.clock.until(() => this.frame().gesture.type === null, this.timing.gestureRelease);
-      if (!(await this.clock.until(() => chat.countAssistantMessages() > before, this.timing.textGrace))) {
-        rec.invalidReason = 'assistant-audio-without-reply-text';
-        return 'failed';
-      }
       this.captureText(rec, before);
       return 'ok';
     } finally {
@@ -519,7 +418,7 @@ export class CalibrationRunner {
           }
           this.trace!.event('prompt-sent', { chars: step.prompt!.length, interruption: true });
           const onset = await this.clock.until(() => this.frame().signals.assistantSpeaking || !chat.isVoiceModeActive(), this.timing.assistantStart);
-          if (!onset || !chat.isVoiceModeActive() || !(await this.clock.held(() => this.frame().signals.assistantSpeaking, this.timing.assistantMinSpeech, this.timing.assistantStart))) {
+          if (!onset || !chat.isVoiceModeActive()) {
             rec.invalidReason = !chat.isVoiceModeActive() ? 'voice-session-ended' : 'no-assistant-audio';
             continue;
           }

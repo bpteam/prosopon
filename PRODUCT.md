@@ -405,11 +405,9 @@ Debug APIs are development-only and must not become runtime dependencies.
   safe setup.
 - **Calibration.** VAD, pitch, prosody and gesture thresholds are tuned on synthetic signals. The calibration
   wizard collects real-voice data but tunes nothing. The user prepares the existing ChatGPT conversation and opens
-  Voice; the wizard never creates a chat, clears it, navigates or refreshes the page. It arms assistant samples only
-  after Voice is ready and quiet, and accepts one only when sustained tab speech has a new rendered assistant turn;
-  startup chimes and tab noise cannot become samples. Its ChatGPT automation (typing a prompt during Voice, the
-  composer/send/voice/mute
-  selectors, voice-name detection, reply text in voice mode) still has fixture-only paths and needs the real-page
+  Voice; the wizard never creates a chat, clears it, navigates or refreshes the page. Each assistant sample is only
+  composer input → Enter → wait for tab audio to end → record its trace, audio and rendered text. Its ChatGPT
+  automation (composer selector, Enter behaviour, reply text in voice mode) still has fixture-only paths and needs the real-page
   checks in [docs/calibration-wizard.md](docs/calibration-wizard.md#manual-checks-on-real-chatgptcom). Other
   procedures are manual ([docs/](docs/)).
 - **Viseme quality.** HeadAudio's model is English; the wLipSync profile is one speaker. Neither is validated on

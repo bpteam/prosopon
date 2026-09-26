@@ -65,7 +65,8 @@ export function calibrationPanel(doc: Document, bridge: DevBridge, slot: Calibra
 
   function start(): void {
     if (!languages.length) return;
-    const runner = slot.create({ languages, userLanguages: languages });
+    // This flow is assistant-only: one typed prompt → one spoken response → one recorded sample.
+    const runner = slot.create({ languages, user: false });
     attach(runner);
     void runner.start();
   }

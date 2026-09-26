@@ -82,6 +82,8 @@ export interface ConversationAutomation {
   startVoice(timeoutMs?: number): Promise<boolean>;
   /** The visible Voice session has its controls mounted and can safely receive a calibration prompt. */
   isVoiceReady(): boolean;
+  /** True only when a discovered Voice microphone control says ChatGPT's mic is muted. */
+  isVoiceMicMuted(): boolean;
   /** Mutes/unmutes ChatGPT's own microphone in the voice session. False when no such control was found. */
   setVoiceMicMuted(muted: boolean): Promise<boolean>;
   /** Types `text` into the composer and sends it. False when the composer or the send control was not found. */
@@ -178,6 +180,11 @@ export const CHATGPT_SELECTORS = {
     'button[aria-label="Включить микрофон" i]',
     'button[aria-label*="silenciar" i]',
     'button[aria-label*="activar micr" i]',
+    // Generic localized fallbacks. They are only queried after a Voice session is confirmed active.
+    'button[aria-label*="мікрофон" i]',
+    'button[aria-label*="микрофон" i]',
+    'button[aria-label*="microphone" i]',
+    'button[aria-label*="micrófono" i]',
   ],
   /** A checked option in a voice picker (menu, radio group, listbox) that may be on the page. */
   selectedOption: ['[role="menuitemradio"][aria-checked="true"]', '[role="radio"][aria-checked="true"]', '[role="option"][aria-selected="true"]'],
@@ -479,9 +486,14 @@ export class ChatGPTAdapter implements ConversationUiAdapter, ConversationAutoma
   }
 
   isVoiceReady(): boolean {
-    // The orb is mounted before the rest of the Voice controls on some ChatGPT builds. A calibration must not
-    // send its first prompt into that transition (the startup chime is tab audio too).
-    return this.isVoiceModeActive() && this.first(CHATGPT_SELECTORS.voiceMute) !== null && this.isComposerReady();
+    // The orb is the only production-stable lifecycle signal. Mute and composer are validated immediately before
+    // they are used; requiring them here turns harmless React mounting order into a fatal startup timeout.
+    return this.isVoiceModeActive();
+  }
+
+  isVoiceMicMuted(): boolean {
+    const button = this.first(CHATGPT_SELECTORS.voiceMute);
+    return button !== null && voiceMicMuted(button);
   }
 
   async setVoiceMicMuted(muted: boolean): Promise<boolean> {
@@ -514,23 +526,11 @@ export class ChatGPTAdapter implements ConversationUiAdapter, ConversationAutoma
         composer.dispatchEvent(new (this.win().InputEvent)('input', { bubbles: true, inputType: 'insertText', data: text }));
       }
     }
-    const form = composer.closest('form');
-    if (this.first(CHATGPT_SELECTORS.sendButton) === null && form) {
-      form.requestSubmit();
-      return this.waitFor(() => composerText(composer).trim() === '', Math.min(timeoutMs, 2000));
-    }
-    const ready = await this.waitFor(() => {
-      const b = this.first(CHATGPT_SELECTORS.sendButton);
-      return b !== null && !(b as HTMLButtonElement).disabled;
-    }, timeoutMs);
-    if (ready) {
-      this.first(CHATGPT_SELECTORS.sendButton)!.click();
-      return this.waitFor(() => composerText(composer).trim() === '', Math.min(timeoutMs, 2000));
-    }
-    // Current Voice composer has no Send button. Its native form submission is the same user-visible action as
-    // Enter, unlike inventing a DOM-specific click target. A cleared composer confirms React accepted the input.
-    if (!form) return false;
-    form.requestSubmit();
+    // Deliberately use the same action a person uses in the composer. No selector hunt or button click: calibration
+    // writes one prompt, presses Enter, then observes the resulting audio and transcript.
+    const Keyboard = this.win().KeyboardEvent;
+    composer.dispatchEvent(new Keyboard('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
+    composer.dispatchEvent(new Keyboard('keyup', { key: 'Enter', code: 'Enter', bubbles: true }));
     return this.waitFor(() => composerText(composer).trim() === '', Math.min(timeoutMs, 2000));
   }
 

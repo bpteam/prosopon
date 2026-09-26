@@ -370,10 +370,9 @@ IndexedDB. The `PROSOPON_EMBED_MODEL=1 …` script syntax needs a POSIX shell (u
 - **Semantic layer.** The assistant-message selector and the reply text in voice mode are unverified on production
   (fixture only); if ChatGPT doesn't render the reply while it speaks, semantic accents are silent in voice mode.
   Timing is a fixed-rate estimate, not alignment. See [../docs/semantic-calibration.md](../docs/semantic-calibration.md).
-- **Calibration wizard automation** (`ConversationAutomation` in `ChatGPTAdapter`): current Voice uses a readiness
-  barrier (controls present + quiet startup), confirms mute state and accepts a reply only after sustained audio and
-  a new rendered assistant turn. Current Ukrainian Start Voice and mute labels are covered alongside stable data
-  attributes; send and the remaining locales still need the real-page checks in
+- **Calibration wizard automation** (`ConversationAutomation` in `ChatGPTAdapter`): the user prepares the Voice
+  session. For each sample the wizard writes a phrase into the composer, presses Enter, waits for tab audio to end,
+  and records audio, trace and any rendered text. The composer selector and Enter behaviour need the real-page checks in
   [../docs/calibration-wizard.md](../docs/calibration-wizard.md#manual-checks-on-real-chatgptcom).
 - **VRM expression overrides.** Presets with `overrideMouth: blend` are pre-compensated; a model whose emotion
   presets `block` the mouth gets no procedural emotion on them (warned once).

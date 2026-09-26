@@ -15,10 +15,13 @@ function page(): { composer: HTMLTextAreaElement; send: HTMLButtonElement; sent:
   send.disabled = true;
   const sent: string[] = [];
   composer.addEventListener('input', () => (send.disabled = composer.value.length === 0));
-  send.addEventListener('click', () => {
+  const submit = () => {
     sent.push(composer.value);
     composer.value = '';
     send.disabled = true;
+  };
+  composer.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && !send.disabled) submit();
   });
   document.body.append(composer, send);
   return { composer, send, sent };
@@ -48,12 +51,13 @@ describe('ChatGPTAdapter automation', () => {
     expect(sent).toEqual(['Say exactly: "Hola."']);
   });
 
-  it('fails instead of hanging when there is no composer or the send button never enables', async () => {
+  it('fails without a composer and sends with Enter even when no button exists', async () => {
     const adapter = new ChatGPTAdapter(document);
     await expect(adapter.sendMessage('x')).resolves.toBe(false);
-    const { send } = page();
+    const { send, sent } = page();
     send.remove();
-    await expect(adapter.sendMessage('x', 30)).resolves.toBe(false);
+    await expect(adapter.sendMessage('x', 30)).resolves.toBe(true);
+    expect(sent).toEqual(['x']);
   });
 
   it('counts messages, waits for a new assistant reply and knows an empty chat', async () => {
@@ -91,6 +95,8 @@ describe('ChatGPTAdapter automation', () => {
     const adapter = new ChatGPTAdapter(document);
     await expect(adapter.startVoice(1000)).resolves.toBe(true);
     expect(adapter.detectVoiceMode()).toBe('realtime');
+    // The orb is sufficient; React may mount the composer and mute control after it.
+    expect(adapter.isVoiceReady()).toBe(true);
   });
 
   it('drives the current localized Voice controls and waits until they are ready', async () => {
@@ -140,8 +146,8 @@ describe('ChatGPTAdapter automation', () => {
     mute.setAttribute('aria-label', 'Вимкнути мікрофон');
     mute.addEventListener('click', () => mute.setAttribute('aria-label', mute.getAttribute('aria-label') === 'Вимкнути мікрофон' ? 'Увімкнути мікрофон' : 'Вимкнути мікрофон'));
     let submitted = '';
-    form.addEventListener('submit', (event) => {
-      event.preventDefault();
+    composer.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter') return;
       submitted = composer.textContent ?? '';
       composer.textContent = '';
     });
