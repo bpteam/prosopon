@@ -1,6 +1,9 @@
-# US-006 calibration (manual, real mic + real ChatGPT voice)
+# Prosody / emotion calibration (manual, real mic + real ChatGPT voice)
 
-Everything in US-006 was tuned on synthetic signals. These checks need your microphone, your room and ChatGPT's
+Context: [PRODUCT.md §5.8](../PRODUCT.md#58-prosody-and-emotion-both-channels), code and tunables:
+[avatar/README.md](../avatar/README.md#emotion-contracts). Rules: [AGENTS.md](../AGENTS.md).
+
+The prosody/emotion analyser and the mapping were tuned on synthetic signals. These checks need your microphone, your room and ChatGPT's
 real voice. Budget: ~30 minutes. Record findings as the JSON from *copy changed settings*.
 
 ## 0. Setup
@@ -20,7 +23,7 @@ real voice. Budget: ~30 minutes. Record findings as the JSON from *copy changed 
 
 | # | Do | Expect (overlay `user` block) | If not, tune |
 |---|----|------|------|
-| 1 | Long silence, 20 s | `silent`, conf 0.00, mix user 0.00 | VAD `activationMargin` (US-005) if it flickers `active` |
+| 1 | Long silence, 20 s | `silent`, conf 0.00, mix user 0.00 | VAD `activationMargin` if it flickers `active` |
 | 2 | Fan / background noise on, silent | stays `silent`; no reaction | VAD margins; `activeOnRatio` |
 | 3 | Quiet voice, 10 s | `active`, aro low (≲0.35), en low, conf rising to ~0.4–0.6 | `arousalWeights.energy`, extractor `energyRangeDb` |
 | 4 | Normal voice | aro mid (~0.4–0.6) | `baselineWeight`, `baselineWarmup` |
@@ -48,12 +51,17 @@ Ask for answers that differ: calm, energetic, slow, fast, expressive, neutral (e
 
 Nothing should look dramatic. If a change is visible only with the switch off/on side by side, it is about right.
 
-## 3. Optional: a local model
+## 3. Optional: the local model
 
-Put `model.onnx` + `model.json` in `avatar/public/emotion-model/` (git-ignored), rebuild. The overlay shows
-`model ready · N runs` and mode `ml-webgpu` or `ml-wasm`. Check its license before any distribution. Compare
-valence on laughs / warm vs irritated speech with and without it; if it doesn't beat chance on Russian speech and
-ChatGPT's voice, drop `trust` or remove it.
+Extension: popup → *Install & Enable emotions* (see
+[extension/README.md](../extension/README.md#emotion-model)). The overlay shows `model ready · N runs` and mode
+`ml-webgpu` or `ml-wasm`. Compare valence on laughs / warm vs irritated speech with the model enabled and disabled
+(*Disable emotions* keeps it installed). If it doesn't beat chance on Russian speech and ChatGPT's voice, lower
+`trust` in `extension/src/emotion/InstalledModel.ts` or leave the model disabled.
+
+Sandbox: put an `.onnx` + `model.json` in `avatar/public/emotion-model/` (git-ignored; format on `parseModelSpec` in
+`avatar/src/audio/emotion/EmotionModel.ts`) and use *load ./emotion-model/model.json* in the Emotion / Prosody
+folder. Check a model's licence before any distribution.
 
 ## 4. Record
 

@@ -1,4 +1,4 @@
 .idea
 dev-profile/
-# US-006: a local emotion model is dropped in by the user (licence, size); never committed.
+# Sandbox-only local emotion model (see avatar/README.md); never committed.
 avatar/public/emotion-model/

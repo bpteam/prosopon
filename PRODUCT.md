@@ -1,2179 +1,351 @@
 # PRODUCT.md — Prosopon
 
-> **Primary product and architecture context for AI agents.**
+> PRODUCT.md is the primary product and architecture context for humans and AI agents.
 >
-> Before proposing or implementing changes:
+> Before proposing or implementing changes, inspect PRODUCT.md and the current code.
 >
-> 1. Read this file.
-> 2. Inspect the current code.
-> 3. Inspect architecture tests relevant to the subsystem being changed.
-> 4. Reuse existing contracts and extension points instead of creating parallel implementations.
->
-> **If documentation and implementation disagree, current code is the final source of truth.**
+> If documentation and implementation disagree, current code and architecture tests are the final source of truth.
+
+Related documents: [README.md](README.md) (onboarding, quick start) · [AGENTS.md](AGENTS.md) (rules for agents and
+contributors) · [avatar/README.md](avatar/README.md) (avatar core in detail) ·
+[extension/README.md](extension/README.md) (Chrome extension in detail) · [docs/](docs/) (calibration procedures).
+
+This file describes the **current** product. It is not a changelog: history lives in git.
 
 ---
 
 ## 1. Product
 
-**Prosopon** is a browser-based realtime VRM avatar for voice AI.
+Prosopon is a browser-based real-time VRM avatar for voice AI. Today it ships as a Chrome Manifest V3 extension that
+replaces the ChatGPT Voice orb on `chatgpt.com` with an animated VRM character.
 
-The current product integrates with **ChatGPT Voice / Live** through a Chrome Manifest V3 extension and replaces the standard voice orb with an animated VRM character.
+The avatar reacts to assistant speech (lip sync, prosody), user speech (voice activity, prosody), conversation state,
+procedural idle behaviour and procedural gestures, optionally refined by a local emotion ML model.
+**No speech-to-text is involved**: every signal is acoustic.
 
-The avatar reacts to:
+Intended experience:
 
-- assistant speech audio;
-- user speech activity;
-- user prosody;
-- assistant prosody;
-- conversation state;
-- procedural idle behavior;
-- procedural gestures;
-- optional local emotion ML inference.
+- assistant speaks → mouth, face and body react;
+- user speaks → the avatar listens and reacts (attentive, not mirroring);
+- user interrupts → behaviour switches at once;
+- silence → natural idle.
 
-The system is designed so that animation does **not** require speech-to-text.
+Design direction: subtle over exaggerated; continuous motion over canned states; local real-time processing;
+graceful fallback when optional parts fail; an avatar core that does not depend on ChatGPT.
 
----
-
-## 2. Product Goal
-
-The intended experience is:
-
-```text
-ChatGPT Voice
-    ↓
-Prosopon avatar appears instead of the orb
-    ↓
-assistant speaks → mouth + face + body react
-user speaks      → avatar listens/reacts
-interruptions    → avatar immediately changes behavior
-silence          → natural idle behavior
-```
-
-The avatar should feel alive without becoming visually noisy or over-animated.
-
-Core design direction:
-
-- subtle behavior over exaggerated motion;
-- continuous motion over discrete canned states;
-- local realtime processing where possible;
-- graceful fallback when optional components fail;
-- provider-independent avatar core.
-
----
-
-## 3. Repository
-
-Repository:
-
-```text
-https://github.com/bpteam/prosopon
-```
-
-Reference checked while creating this document:
-
-```text
-branch: master
-commit: 359cde84b8fa5d126b7a481fa39f734bfbffacd7
-```
-
-Main layout:
+## 2. Repository layout
 
 ```text
 prosopon/
-├── avatar/       # reusable renderer / audio / behavior core + sandbox
-├── extension/    # Chrome MV3 integration
-├── docs/         # calibration / implementation notes
-└── compose.yaml
-```
-
-The extension imports reusable functionality from `avatar/src`.
-
-**Do not create a second avatar/audio/behavior implementation inside `extension/`.**
-
----
-
-# 4. Technology Stack
-
-```text
-TypeScript
-Vite
-Three.js
-@pixiv/three-vrm
-Chrome Extension Manifest V3
-Web Audio API
-AudioWorklet
-ONNX Runtime Web
-Vitest
-Playwright
-Docker / Docker Compose
-```
-
-Lip-sync analyzers:
-
-```text
-AmplitudeLipSync
-HeadAudio
-wLipSync
-```
-
-Emotion ML:
-
-```text
-omote-ai/distilhubert-ser
-DistilHuBERT SER INT8 ONNX
-```
-
----
-
-# 5. Core Mental Model
-
-Prosopon is not a Three.js talking-head demo.
-
-The architecture is:
-
-```text
-                  ┌─ idle
-                  ├─ conversation state
-User audio ───────┼─ user reaction
-                  ├─ user emotion
-                  │
-Assistant audio ──┼─ lip sync
-                  ├─ assistant emotion
-                  │
-                  └─ gestures
-                         ↓
-                   BehaviorMixer
-                         ↓
-                  AvatarController
-                         ↓
-                       Avatar
-                         ↓
-                      three-vrm
-```
-
-ChatGPT is currently one provider/integration around that core.
-
-The avatar core should remain reusable with other realtime voice providers.
-
----
-
-# 6. Architectural Invariants
-
-These are deliberate architectural constraints and should be preserved unless a task explicitly changes them.
-
-## 6.1 One render loop
-
-There is one main `requestAnimationFrame` render loop.
-
-Subsystems must not create their own visual animation loops.
-
----
-
-## 6.2 One procedural writer
-
-`AvatarController` + `BehaviorMixer` own procedural composition.
-
-Correct:
-
-```text
-Source
-  ↓
-typed frame
-  ↓
-BehaviorMixer
-  ↓
-AvatarController
-  ↓
-Avatar
-```
-
-Wrong:
-
-```text
-GestureEngine      → bone.rotation
-EmotionAnalyzer    → Avatar.setExpression()
-LipSyncEngine      → vrm.expressionManager
-```
-
----
-
-## 6.3 Audio and rendering are isolated
-
-Audio code must not import:
-
-```text
-Avatar
-AvatarController
-Three.js
-three-vrm
-```
-
-Rendering code must not receive:
-
-```text
-raw PCM
-AudioNode
-AudioContext
-MediaStream
-```
-
-Only compact typed numeric frames cross subsystem boundaries.
-
----
-
-## 6.4 ChatGPT DOM is isolated
-
-All ChatGPT-specific selectors and DOM knowledge belong in:
-
-```text
-ChatGPTAdapter
-```
-
-Selectors must not leak into avatar/audio/behavior code.
-
----
-
-## 6.5 Conversation state has one resolver
-
-Audio processors emit signals.
-
-They do not call:
-
-```ts
-controller.setState(...)
-```
-
-directly.
-
-`ConversationSignalResolver` is the integration-layer owner of:
-
-```text
-idle
-listening
-thinking
-speaking
-```
-
----
-
-## 6.6 Lip-sync owns articulation only
-
-Lip-sync owns:
-
-```text
-aa
-ih
-ou
-ee
-oh
-```
-
-It does not own:
-
-```text
-blink
-semantic emotion
-conversation state
-gestures
-```
-
----
-
-## 6.7 Gestures go through BehaviorMixer
-
-`GestureEngine` produces a `GestureFrame`.
-
-It never manipulates VRM bones directly.
-
----
-
-## 6.8 User reactions are reactions, not mirroring
-
-The avatar should not simply copy the user's:
-
-```text
-energy
-pitch
-emotion
-```
-
-User signals are mapped into bounded attentive/reaction behavior.
-
----
-
-## 6.9 Animation does not require STT
-
-Current lip-sync, state, prosody, emotion and gesture behavior do not depend on transcription.
-
-No new feature should introduce STT as a hidden requirement unless explicitly intended.
-
----
-
-## 6.10 Fail soft
-
-Failure of optional systems must not break ChatGPT or basic avatar rendering.
-
-Examples:
-
-```text
-emotion model fails      → heuristic mode
-viseme analyzer fails    → amplitude lip-sync
-microphone denied        → assistant avatar still works
-ChatGPT selector drift   → ChatGPT stays usable
-```
-
----
-
-# 7. Avatar Rendering
-
-The avatar sandbox and extension use:
-
-```text
-Three.js
-+
-@pixiv/three-vrm
-+
-VRM 1.0
-```
-
-Implemented:
-
-- WebGL renderer;
-- transparent canvas;
-- responsive resize;
-- VRM loading;
-- VRMUtils optimizations;
-- humanoid normalized bones;
-- VRM expressions;
-- lookAt;
-- spring-bone runtime update;
-- neutral lighting;
-- debug overlay;
-- development GUI.
-
-Default framing is portrait-oriented:
-
-```text
-head
-shoulders
-upper torso
-```
-
-Camera framing is derived from the head bone where possible.
-
-A fallback exists for models without a usable head bone.
-
----
-
-# 8. Rest Pose
-
-VRM models usually load in T-pose.
-
-Prosopon has a configured `REST_POSE` that lowers the arms for portrait use.
-
-This is part of the manual/base layer.
-
-Procedural motion must return to `REST_POSE`, not raw T-pose.
-
----
-
-# 9. Avatar Layering
-
-Conceptually:
-
-```text
-manual/base layer
-+
-procedural layer
-=
-final avatar pose
-```
-
-Manual/base layer includes:
-
-```text
-REST_POSE
-manual expressions
-manual bone rotations
-debug controls
-```
-
-Procedural layer includes:
-
-```text
-idle
-conversation state
-mouth
-emotion
-user reaction
-gestures
-```
-
-Composition happens once per frame.
-
----
-
-# 10. AvatarController
-
-`AvatarController` is the public high-level API of the avatar subsystem.
-
-It can exist before the VRM is loaded.
-
-Example:
-
-```ts
-const controller = new AvatarController({ idle });
-
-controller.setState('speaking');
-
-controller.attachAvatar(avatar);
-
-controller.update(delta);
-```
-
-This intentionally preserves state events that arrive before model loading completes.
-
----
-
-# 11. Conversation States
-
-Implemented states:
-
-```text
-idle
-listening
-thinking
-speaking
-```
-
-State profiles control:
-
-- head movement multiplier;
-- gaze movement multiplier;
-- breathing multiplier;
-- head offsets;
-- gaze offsets;
-- body lean;
-- user/assistant emotion weights.
-
-Transitions are:
-
-- delta-time based;
-- smooth;
-- continuous across mid-transition target changes.
-
-Re-setting the current target state is a no-op.
-
-Conversation state is separate from emotion.
-
-```text
-thinking != sad
-speaking != happy
-```
-
----
-
-# 12. ConversationSignalResolver
-
-Inputs:
-
-```text
-voice UI active
-user speaking
-assistant speaking
-```
-
-Typical state flow:
-
-```text
-voice UI opens
-→ listening
-
-user speaks
-→ listening
-
-user stops
-→ thinking
-
-assistant starts
-→ speaking
-
-assistant stops
-→ listening
-```
-
-User speech has priority during interruptions.
-
-Current behavior includes:
-
-```text
-minimum interruption speech ≈ 300 ms
-thinking timeout ≈ 6 s
-```
-
-Short echo/noise spikes should not flip state.
-
----
-
-# 13. Procedural Idle
-
-Implemented:
-
-- breathing;
-- automatic blinking;
-- occasional double blink;
-- micro head motion;
-- subtle gaze drift.
-
-Timing is delta-based.
-
-Blink/gaze state transitions split delta at event boundaries.
-
-Behavior is tested across approximately:
-
-```text
-30 FPS
-60 FPS
-120 FPS
-```
-
-Main frame delta is clamped to:
-
-```text
-0.1 s
-```
-
-to avoid large jumps after tab suspension / very slow frames.
-
----
-
-# 14. Blink
-
-Automatic blink belongs to the idle/procedural layer.
-
-Manual and procedural blink combine via:
-
-```text
-max(manual, procedural)
-```
-
-State changes must not:
-
-- reset blink timers;
-- reopen eyes mid-blink;
-- restart blink phases.
-
----
-
-# 15. Gaze
-
-`vrm.lookAt.target` uses a proxy object.
-
-The proxy is derived from:
-
-```text
-camera target
-+
-procedural gaze offset
-```
-
-This allows:
-
-- independent head movement;
-- stable eye contact;
-- subtle gaze shifts;
-- no direct eye-bone manipulation.
-
----
-
-# 16. AudioInput
-
-Core audio abstraction supports:
-
-```text
-file
-microphone
-test signal
-external AudioNode
-MediaStream
-```
-
-One active source goes through an `AnalyserNode`.
-
-Current amplitude analysis uses:
-
-```text
-fftSize = 1024
-```
-
-roughly ~21 ms at common sample rates.
-
----
-
-# 17. Amplitude Lip Sync
-
-Pipeline:
-
-```text
-RMS
-↓
-dBFS
-↓
-noise gate
-↓
-level mapping
-↓
-attack/release smoothing
-↓
-mouth openness
-```
-
-Current approximate defaults:
-
-```text
-noiseFloorDb ≈ -50
-fullOpenDb   ≈ -18
-maxOpen      ≈ 0.8
-attack       ≈ 30 ms
-release      ≈ 100 ms
-```
-
-Smoothing:
-
-```text
-target + (value - target) * exp(-dt / tau)
-```
-
-This is frame-rate independent.
-
-Known limitation:
-
-```text
-volume != articulation
-```
-
-Amplitude mode is intentionally a fallback.
-
----
-
-# 18. Viseme Lip Sync
-
-Implemented VRM visemes:
-
-```text
-aa
-ih
-ou
-ee
-oh
-```
-
-Current model:
-
-```text
-viseme analyzer determines shape
-amplitude determines opening
-```
-
-Conceptually:
-
-```text
-shape × loudness = final mouth weights
-```
-
-Visemes are smoothed and crossfaded.
-
-Silence closes the mouth.
-
----
-
-# 19. Lip-Sync Analyzers
-
-## 19.1 HeadAudio
-
-Uses:
-
-```text
-MFCC
-Gaussian prototypes
-AudioWorklet
-```
-
-Outputs Oculus-like visemes mapped to VRM.
-
-Strengths:
-
-- local;
-- lightweight;
-- no STT.
-
-Limitation:
-
-- currently English-oriented.
-
----
-
-## 19.2 wLipSync
-
-Uses uLipSync-style MFCC matching in WASM.
-
-Outputs roughly:
-
-```text
-A
-I
-U
-E
-O
-S
-```
-
-mapped to VRM.
-
-Limitation:
-
-- current profile is speaker-dependent.
-
----
-
-## 19.3 Fallback
-
-If the viseme analyzer:
-
-- fails to initialize;
-- worklet asset fails;
-- processor crashes;
-
-Prosopon falls back to amplitude lip-sync.
-
----
-
-# 20. Mouth Ownership
-
-Lip-sync owns articulation.
-
-Emotion can influence non-articulation mouth bias such as smile, but must not overwrite visemes.
-
-VRM presets with:
-
-```text
-overrideMouth: blend
-overrideBlink: blend
-```
-
-are compensated so emotion does not weaken lip-sync/blinking.
-
-Hard `block` overrides are not used procedurally when they would break articulation.
-
----
-
-# 21. User Voice Analysis
-
-User microphone reactions are optional.
-
-The microphone analysis pipeline is independent from assistant tab audio.
-
-```text
-assistant tab audio → assistant pipeline
-microphone          → user pipeline
-```
-
-They are never mixed before analysis.
-
----
-
-# 22. Microphone Capture
-
-Requested approximately as:
-
-```ts
-{
-  echoCancellation: true,
-  noiseSuppression: true,
-  autoGainControl: false
-}
-```
-
-Microphone audio is not connected to speakers.
-
-There is deliberately no feedback path:
-
-```text
-mic → AudioContext.destination
-```
-
----
-
-# 23. Voice Activity Detection
-
-Implemented VAD includes:
-
-```text
-tracked noise floor
-activation margin
-deactivation margin
-attack
-hangover
-```
-
-Current approximate values:
-
-```text
-activation margin: 12 dB
-deactivation margin: 6 dB
-attack: 100 ms
-hangover: 300 ms
-```
-
-Noise floor adapts slowly even during sustained loud input.
-
-Reason:
-
-constant noise such as a fan must not cause permanent `speaking = true`.
-
----
-
-# 24. Pitch Detection
-
-Implemented McLeod Pitch Method.
-
-Approximate range:
-
-```text
-60–800 Hz
-```
-
-Low-confidence/unvoiced frames produce:
-
-```text
-pitchHz = null
-```
-
-instead of invented pitch.
-
----
-
-# 25. Pitch Baseline
-
-Raw Hz is not used as emotion directly.
-
-A personal/session baseline is created from confident voiced speech.
-
-Approximate behavior:
-
-```text
-initial baseline:
-median of first ~1.5 s voiced speech
-
-slow adaptation:
-~40 s log-domain average
-```
-
-Relative pitch is represented in semitones.
-
----
-
-# 26. UserVoiceFrame
-
-The user analysis pipeline emits numeric frames, conceptually:
-
-```ts
-{
-  speaking,
-  rmsDb,
-  energy,
-  pitchHz,
-  pitchConfidence,
-  relativePitch,
-  pitchVariation
-}
-```
-
-Raw PCM is not transported into the content renderer.
-
----
-
-# 27. User Reactions
-
-Path:
-
-```text
-UserVoiceFrame
-↓
-UserReactionMapper
-↓
-UserReactionFrame
-↓
-BehaviorMixer
-```
-
-The avatar reacts rather than mirrors.
-
-Examples:
-
-```text
-higher user energy
-→ slightly more attentiveness
-
-higher relative pitch
-→ subtle attention change
-```
-
-The user's voice never drives avatar lip-sync.
-
----
-
-# 28. Interruption Handling
-
-When assistant speech and meaningful user speech overlap:
-
-```text
-assistant speaking
-+
-user speaking
-↓
-listening
-```
-
-Current minimum interruption speech is ~300 ms.
-
-User reaction weight increases.
-
-Assistant self-expression weight drops strongly.
-
----
-
-# 29. Prosody / Emotion Analysis
-
-Both channels use the same implementation:
-
-```text
-ProsodyEmotionAnalyzer
-```
-
-with independent state:
-
-```text
-user analyzer
-assistant analyzer
-```
-
-No STT.
-
-No transcript.
-
-No backend is required for realtime analysis.
-
----
-
-# 30. EmotionFrame
-
-Conceptually contains:
-
-```text
-valence
-arousal
-energy
-tension
-pitch lift
-pitch variation
-confidence
-valence confidence
-mode
-```
-
-The analyzer does not know about Avatar/VRM/Three.js.
-
----
-
-# 31. Heuristic Prosody Mode
-
-Without ML, Prosopon uses features including:
-
-```text
-energy
-pitch
-pitch variation
-speech rate proxy
-spectral centroid
-spectral rolloff
-zero crossing rate
-voiced ratio
-pause structure
-```
-
-Useful outputs:
-
-```text
-arousal
-energy
-tension
-```
-
-Valence from acoustic-only heuristics is intentionally low-confidence.
-
----
-
-# 32. Emotion Behavior
-
-When the assistant speaks:
-
-```text
-assistant EmotionFrame
-↓
-self-expression
-```
-
-may affect:
-
-- face;
-- brows;
-- eye openness;
-- head motion;
-- gaze;
-- posture;
-- gesture energy.
-
-When the user speaks:
-
-```text
-user EmotionFrame
-↓
-reaction behavior
-```
-
-The avatar becomes more attentive rather than copying emotion directly.
-
----
-
-# 33. Emotion Channel Priority
-
-Typical current weighting:
-
-```text
-speaking:
-assistant ≈ 1
-user ≈ 0
-
-listening:
-assistant ≈ 0.15
-user ≈ 1
-```
-
-The final mapping is inside `BehaviorMixer`.
-
----
-
-# 34. Emotion ML Model
-
-Configured model:
-
-```text
-omote-ai/distilhubert-ser
-```
-
-Artifact:
-
-```text
-distilhubert_ser_int8.onnx
-```
-
-Pinned immutable revision:
-
-```text
-6c4a6846578f718581e01883d01af7d174839123
-```
-
-Expected size:
-
-```text
-50,630,102 bytes
-```
-
-Expected SHA-256:
-
-```text
-b3bd62c1d1e74983ce712458e25368dfe32d37b7fc20618f109fd0bfa49cfa97
-```
-
-Expected input:
-
-```text
-mono
-16 kHz
-Float32
-```
-
-Outputs:
-
-```text
-arousal
-valence
-```
-
-Source of truth:
-
-```text
-extension/src/emotion/EmotionModelManifest.ts
-```
-
----
-
-# 35. Emotion Model Installation
-
-The user can install the model directly from the extension popup.
-
-Flow:
-
-```text
-Install & Enable emotions
-↓
-download pinned ONNX
-↓
-verify exact size
-↓
-verify SHA-256
-↓
-store in IndexedDB
-↓
-initialize ONNX Runtime
-↓
-self-test
-↓
-ready
-```
-
-Available actions:
-
-```text
-Install & Enable
-Enable
-Disable
-Remove
-Retry
-Cancel download
-```
-
-No manual file copying is required.
-
----
-
-# 36. Emotion Model Storage
-
-Binary model:
-
-```text
-IndexedDB
-database: prosopon-emotion-models
-```
-
-Metadata:
-
-```text
-chrome.storage.local
-```
-
-Metadata includes:
-
-```text
-model id
-revision
-sha256
-installation timestamp
-enabled
-```
-
-Model bytes are not stored as base64 in Chrome storage.
-
----
-
-# 37. Integrity
-
-Every downloaded model is verified against:
-
-```text
-exact size
-SHA-256
-```
-
-Production does not use:
-
-```text
-resolve/main
-```
-
-A corrupt/incomplete model is deleted and is not considered installed.
-
----
-
-# 38. ONNX Runtime
-
-Inference fallback:
-
-```text
-WebGPU
-↓
-WASM
-↓
-heuristic
-```
-
-ORT executable JS/WASM is packaged locally.
-
-Remote executable code is not loaded.
-
-Current CSP requires:
-
-```text
-wasm-unsafe-eval
-```
-
-for ORT WASM.
-
----
-
-# 39. Model Download Permission
-
-Current extension manifest allows:
-
-```text
-https://huggingface.co/*
-```
-
-for the pinned model download.
-
-After installation, inference is local and works offline.
-
----
-
-# 40. Embedded Model Build
-
-An embedded model build path exists:
-
-```bash
-npm run build:extension:embedded
-```
-
-using:
-
-```text
-PROSOPON_EMBED_MODEL=1
-```
-
-This packages the ONNX artifact with the extension.
-
-Use this if Chrome Web Store review/policy makes remote model download undesirable.
-
----
-
-# 41. Gesture Engine
-
-Implemented renderer-independent gesture system:
-
-```text
-avatar/src/avatar/gesture/
-```
-
-Core:
-
-```text
-Gesture.ts
-GestureConfig.ts
-GestureEngine.ts
-```
-
-The gesture engine does not import Avatar/Three.js/VRM.
-
----
-
-# 42. Gesture Behavior
-
-Gesture frames can affect:
-
-```text
-head
-body
-shoulders
-upper arms
-lower arms
-```
-
-Examples include:
-
-- nod;
-- head tilt;
-- body shift;
-- shoulder shift;
-- speaking hand emphasis.
-
-One primary gesture is active at a time.
-
----
-
-# 43. Gesture Scheduling
-
-Gesture lifecycle:
-
-```text
-prepare
-→ attack
-→ hold
-→ release
-```
-
-Features:
-
-- randomized cooldown;
-- state-dependent rate;
-- emotion/prosody modulation;
-- repeat penalty;
-- priorities;
-- cancellation;
-- fast release during interruption.
-
-Hands are currently only used during assistant speech.
-
----
-
-# 44. Gesture Priority
-
-Conceptually:
-
-```text
-forced/debug
->
-boundary
->
-speaking emphasis
->
-ambient
-```
-
-Interrupted assistant gestures release smoothly rather than snapping.
-
----
-
-# 45. Nod Ownership
-
-Nod generation belongs to `GestureEngine`.
-
-`UserReactionMapper` reports utterance boundaries rather than directly owning head nod animation.
-
-This avoids competing head-motion writers.
-
----
-
-# 46. Missing Bones
-
-Gesture behavior degrades gracefully when optional humanoid bones are missing.
-
-Missing arms/shoulders must not crash the avatar.
-
-Fallback body/chest motion may be used where appropriate.
-
----
-
-# 47. Chrome Extension
-
-Manifest V3 extension.
-
-Minimum Chrome:
-
-```text
-116+
-```
-
-Main contexts:
-
-```text
-service worker
-offscreen document
-content script
-permission page
-popup
-```
-
-Target:
-
-```text
-https://chatgpt.com/*
-```
-
----
-
-# 48. Extension Runtime Architecture
-
-```text
-ChatGPT tab
-   │
-   ├── DOM
-   │    ↓
-   │ Content Script
-   │    ↓
-   │ AvatarOverlay
-   │    ↓
-   │ AvatarController
-   │
-   └── audio
-        ↓
-   chrome.tabCapture
-        ↓
-   Offscreen Document
-        ↓
-   analyzers
-        ↓
-   numeric frames
-        ↓
-   content runtime
-```
-
----
-
-# 49. Service Worker
-
-Owns:
-
-```text
-enable/disable
-tab session state
-tabCapture stream IDs
-offscreen lifecycle
-popup coordination
-emotion model installer coordination
-message orchestration
-```
-
-Must not own:
-
-```text
-DOM
-Three.js
-VRM rendering
-PCM analysis
-```
-
----
-
-# 50. Offscreen Runtime
-
-Owns:
-
-```text
-assistant tab MediaStream
-microphone MediaStream
-AudioContexts
-AudioWorklets
-lip-sync
-VAD
-pitch
-prosody
-emotion inference
-```
-
-Must not import:
-
-```text
-Three.js
-VRM
-Avatar
-ChatGPT DOM code
-```
-
----
-
-# 51. Content Runtime
-
-Owns:
-
-```text
-ChatGPTAdapter
-AvatarOverlay
-AvatarController
-ConversationSignalResolver
-FrameMouthSource
-BehaviorMixer inputs
-```
-
-Must not receive raw audio objects.
-
----
-
-# 52. Runtime Transport
-
-Typed protocol with:
-
-```text
-PROTOCOL_VERSION
-```
-
-Transported frames include:
-
-```text
-LipSyncFrame
-UserVoiceFrame
-EmotionFrame
-status/state events
-```
-
-Do not continuously transport:
-
-```text
-PCM
-FFT arrays
-AudioBuffer
-MediaStream
-```
-
----
-
-# 53. Lazy Loading
-
-The manifest content script stays small before activation.
-
-Heavy runtime:
-
-```text
-Three.js
-three-vrm
-avatar runtime
-```
-
-is dynamically loaded only after Prosopon is enabled.
-
----
-
-# 54. ChatGPTAdapter
-
-Only `ChatGPTAdapter` knows ChatGPT selectors.
-
-Uses observation rather than high-frequency polling.
-
-React-managed orb DOM is hidden/restored rather than destructively removed.
-
-If selectors fail:
-
-```text
-ChatGPT remains usable
-avatar may use fallback placement
-orb may remain visible
-```
-
----
-
-# 55. ChatGPT Selector Drift
-
-Current selectors were manually checked against production on:
-
-```text
-2026-09-26
-```
-
-They will eventually drift.
-
-Maintenance point:
-
-```text
-ChatGPTAdapter
-CHATGPT_SELECTORS
-```
-
-Do not fix selector breakage elsewhere.
-
----
-
-# 56. tabCapture
-
-Assistant audio uses:
-
-```text
-chrome.tabCapture
-```
-
-Captured audio goes to:
-
-```text
-analysis
-+
-AudioContext.destination
-```
-
-so the user continues hearing ChatGPT.
-
----
-
-# 57. Microphone Opt-In
-
-Microphone reactions are currently controlled separately through the toolbar action context menu.
-
-Preference storage:
-
-```text
-chrome.storage.session
-```
-
-Therefore it resets after full browser restart.
-
-The microphone is active only when:
-
-```text
-mic reactions enabled
-AND
-at least one Prosopon tab enabled
-```
-
----
-
-# 58. Popup
-
-Current popup has conceptually separate controls.
-
-## Avatar
-
-```text
-Enable avatar
-Disable avatar
-```
-
-## Emotion Intelligence
-
-```text
-Install & Enable emotions
-Enable emotions
-Disable emotions
-Remove emotion model
-Retry
-```
-
-Important:
-
-```text
-avatar enabled
-emotion model enabled
-microphone reactions enabled
-```
-
-are separate states.
-
-Do not conflate them.
-
----
-
-# 59. Privacy
-
-Current intended privacy model:
-
-```text
-ChatGPT tab audio → local analysis
-microphone audio → local analysis
-emotion ONNX      → local inference
-```
-
-Raw audio is not intentionally uploaded for Prosopon analysis.
-
-Network use for the emotion model is currently only the initial pinned model download.
-
----
-
-# 60. Sandbox
-
-The standalone `avatar/` app is a first-class development environment.
-
-Use it to debug:
-
-```text
-VRM rendering
-state machine
-idle
-lip-sync
-emotion
-gestures
-calibration
-```
-
-without extension reload overhead.
-
-Typical commands:
-
-```bash
-cd avatar
-npm install
-npm run dev
-npm test
-npm run test:e2e
-npm run typecheck
-```
-
----
-
-# 61. Extension Development
-
-Typical:
-
-```bash
-cd avatar
-npm ci
-
-cd ../extension
-npm ci
-npm run build
-```
-
-Load:
-
-```text
-chrome://extensions
-→ Developer mode
-→ Load unpacked
-→ extension/dist
-```
-
-Development content scripts do not have HMR like a normal page.
-
-After rebuild, reload the extension and ChatGPT tab as needed.
-
----
-
-# 62. Docker
-
-The repo supports Docker-based development/testing.
-
-Current compose setup covers:
-
-```text
-avatar dev
-avatar tests
-avatar E2E
-extension build
-extension tests
-extension E2E
-```
-
-Use existing `compose.yaml` and package READMEs for exact commands.
-
----
-
-# 63. Tests
-
-Existing test categories:
-
-```text
-unit
-architecture
-Playwright E2E
-```
-
-Coverage includes:
-
-- VRM loading;
-- state transitions;
-- frame-rate independence;
-- idle;
-- blink;
-- gaze;
-- amplitude lip-sync;
-- visemes;
-- analyzer fallback;
-- VAD;
-- pitch;
-- pitch baseline;
-- microphone lifecycle;
-- interruption;
-- ChatGPTAdapter DOM fixtures;
-- tabCapture;
-- offscreen transport;
-- SPA duplication protection;
-- emotion channels;
-- ONNX WebGPU/WASM/fallback paths;
-- gesture scheduling;
-- import-boundary architecture rules;
-- model installer/integrity behavior.
-
-**Do not delete architectural tests merely because they make a new implementation inconvenient.**
-
----
-
-# 64. Debug / Calibration
-
-Existing calibration documentation:
-
-```text
-docs/US-006-calibration.md
-docs/US-008-calibration.md
-```
-
-Development tooling exposes debug information for:
-
-```text
-FPS
-renderer
-state
-lip-sync
-visemes
-user voice
-conversation signals
-emotion
-gestures
-```
-
-Debug APIs are development-only and should not become runtime dependencies.
-
----
-
-# 65. Known Limitations
-
-## 65.1 ChatGPT selector drift
-
-Selectors will break eventually.
-
-Expected repair location:
-
-```text
-ChatGPTAdapter
-```
-
----
-
-## 65.2 Speaker echo / AEC
-
-Real-world speaker echo behavior still needs broader device validation.
-
-Headphones remain the safest environment.
-
-There is deliberately no custom acoustic echo canceller.
-
----
-
-## 65.3 Crosstalk
-
-Assistant output can leak into microphone input.
-
-Current mitigations:
-
-- browser echo cancellation;
-- interruption minimum duration;
-- suppress user reactions while assistant speaks.
-
----
-
-## 65.4 Microphone calibration
-
-VAD and pitch logic are strongly tested synthetically but still require wider real-device tuning.
-
-Thresholds are not universal.
-
----
-
-## 65.5 Viseme quality
-
-HeadAudio is English-oriented.
-
-wLipSync profile quality depends on speaker calibration.
-
-Multilingual speech and different ChatGPT voices require evaluation.
-
----
-
-## 65.6 Lip-sync latency
-
-There is unavoidable analysis-window latency.
-
-An optional monitor delay can be used to align perceived audio/mouth timing, but adds the same audible delay.
-
----
-
-## 65.7 Emotion quality
-
-The current ML model is suitable as an animation-control signal, not as psychological truth.
-
-Arousal is generally more reliable than valence.
-
-The underlying model is trained from acted speech.
-
----
-
-## 65.8 Emotion model size
-
-Approximate model size:
-
-```text
-~50.6 MB
-```
-
-plus ONNX Runtime.
-
-This is a meaningful packaging/storage cost.
-
----
-
-## 65.9 Chrome Web Store remote-model review
-
-The default build can download a pinned ONNX model from Hugging Face.
-
-Executable JS/WASM remains local.
-
-If Web Store review considers the model graph problematic, use the embedded-model build.
-
----
-
-## 65.10 VRM-specific overrides
-
-Different models vary in:
-
-```text
-overrideMouth
-overrideBlink
-expression strengths
-bone proportions
-spring-bone collision setup
-```
-
-Model calibration is expected.
-
----
-
-# 66. Not Implemented Yet
-
-Do not assume the following exists.
-
-## Camera / user visual tracking
-
-Not implemented:
-
-```text
-MediaPipe Face
-camera capture
-face landmarks
-user smile detection
-user head pose
-user gaze tracking
-visual emotion reaction
-```
-
----
-
-## Semantic animation understanding
-
-Not implemented:
-
-```text
-transcript meaning
-text sentiment
-LLM intent signals
-semantic emphasis
-question/answer semantics
-```
-
----
-
-## Semantic gestures
-
-Current gestures are procedural/state/prosody driven.
-
-The avatar does not yet understand semantic requests such as:
-
-```text
-point left
-show something large
-count three things
-gesture toward an object
-```
-
----
-
-## Full-body generative motion
-
-Not implemented:
-
-```text
-motion diffusion
-motion matching DB
-full-body neural animation
-mocap generation
-```
-
----
-
-## Custom echo cancellation
-
-No custom AEC.
-
----
-
-## Speaker identification
-
-No speaker diarization or persistent user identity model.
-
----
-
-## Long-term personalization
-
-Pitch baseline is session-level.
-
-There is no long-term learned behavioral/emotional profile.
-
----
-
-# 67. Recommended Future Directions
-
-These are directions, not commitments.
-
-## 67.1 Real-world hardening
-
-Test:
-
-```text
-multiple ChatGPT voices
-Russian
-Ukrainian
-English
-Spanish
-headphones
-laptop speakers
-external speakers
-different microphones
-long sessions
-tab suspend/resume
-device disconnect/reconnect
-```
-
----
-
-## 67.2 MediaPipe reaction layer
-
-Future architecture should be:
-
-```text
-camera
-↓
-MediaPipe
-↓
-user visual state
-↓
-ReactionSource
-↓
-BehaviorMixer
-```
-
-Do not wire MediaPipe directly to VRM.
-
----
-
-## 67.3 Better multilingual lip-sync
-
-Evaluate/train/calibrate a more universal viseme solution.
-
----
-
-## 67.4 Semantic gesture hints
-
-Optional semantic signals could later feed GestureEngine:
-
-```text
-agreement
-question
-emphasis
-enumeration
-direction
-size
-```
-
-They must remain another source into the behavior system.
-
----
-
-## 67.5 Runtime/model optimization
-
-Potential targets:
-
-```text
-smaller emotion model
-smaller ORT footprint
-lower startup time
-lower inference latency
-better quantization
-```
-
----
-
-## 67.6 Distribution
-
-Chrome Web Store productionization:
-
-```text
-privacy copy
-permission audit
-icons/assets
-release versioning
-store package
-model distribution policy
-release CI
-```
-
----
-
-# 68. Rules for Future AI Agents
-
-Before implementing a new feature:
-
-1. Read `PRODUCT.md`.
-2. Inspect current code.
-3. Inspect relevant architecture tests.
-4. Reuse existing source contracts.
-5. Avoid duplicate subsystem implementations.
-6. Add new behavior as a typed source into `BehaviorMixer`.
-7. Do not send raw PCM across extension contexts unless strictly necessary.
-8. Do not couple audio analyzers to rendering.
-9. Do not couple avatar behavior to ChatGPT DOM.
-10. Preserve graceful fallback behavior.
-11. Keep previous tests green.
-12. If a proposed change violates an invariant, explain the reason before implementing it.
-
----
-
-# 69. Source-of-Truth Priority
-
-When there is disagreement:
-
-```text
-current code
-    >
-architecture tests
-    >
-PRODUCT.md
-    >
-subsystem README/docs
-    >
-old user stories
-```
-
-Old user stories describe historical intent and must not be treated as the current architecture automatically.
-
----
-
-# 70. Summary
-
-Current Prosopon already has:
-
-```text
-VRM renderer
-procedural idle
-conversation state machine
-ChatGPT overlay
-tabCapture
-assistant lip-sync
-amplitude fallback
-HeadAudio / wLipSync
-user microphone analysis
-VAD
-pitch baseline
-interruption handling
-user reactions
-dual-channel prosody analysis
-optional local emotion ML
-one-click emotion-model installation
-gesture engine
-debug/calibration tooling
-unit + architecture + E2E tests
-```
-
-The project should now evolve by **adding new typed behavior sources to the existing pipeline**, not by replacing the core architecture.
+├── avatar/       reusable renderer / audio / behaviour core + standalone sandbox (Vite app)
+├── extension/    Chrome MV3 integration; imports the core from avatar/src (@avatar/* alias)
+├── docs/         manual calibration procedures
+└── compose.yaml  Docker dev/test services for both packages
+```
+
+`avatar/` and `extension/` are separate npm packages (no root workspace). The extension compiles core sources from
+`../avatar/src` and resolves `three`, `@pixiv/three-vrm`, `wlipsync` and `onnxruntime-web` from
+`avatar/node_modules`, so `avatar/` must be installed first.
+
+**Do not create a second avatar/audio/behaviour implementation inside `extension/`.**
+
+Stack: TypeScript, Vite, Three.js, @pixiv/three-vrm (VRM 1.0), Web Audio + AudioWorklet, ONNX Runtime Web 1.30,
+Vitest, Playwright, Docker Compose.
+
+## 3. Architecture
+
+```text
+                  ┌─ conversation state (ConversationStateMachine, profiles)
+                  ├─ idle (AvatarIdleController)
+User audio ───────┼─ user reaction (UserReactionMapper → ReactionSource)
+                  ├─ user emotion      ┐
+Assistant audio ──┼─ assistant emotion ┴─ EmotionChannels (EmotionSource)
+                  ├─ lip sync (MouthSource)
+                  └─ gestures (GestureEngine → GestureSource)
+                              ↓
+                        BehaviorMixer            (the only composition point)
+                              ↓
+                       AvatarController          (the only caller of Avatar.setProcedural)
+                              ↓
+                  Avatar (manual + procedural layers)
+                              ↓
+                          three-vrm
+```
+
+Per frame (one `requestAnimationFrame` loop, delta clamped to 0.1 s):
+`state transition → idle → mouth → reaction → emotion → gesture → BehaviorMixer.compose → avatar.setProcedural →
+avatar.update → render`.
+
+ChatGPT is one integration around this core. New inputs (another voice provider, camera tracking, semantic hints)
+must enter as another typed source into `BehaviorMixer`, never as another writer of bones or expressions.
+
+## 4. Architectural invariants
+
+Preserve these unless a task explicitly changes them (and then update this section and the tests).
+Rules marked *(tested)* are enforced by `avatar/tests/unit/architecture.test.ts` or
+`extension/tests/unit/architecture.test.ts`.
+
+1. **One render loop.** Only `RenderLoop` calls `requestAnimationFrame`. Subsystems pull from it; they do not run
+   their own visual loops or clocks.
+2. **One procedural writer** *(tested)*. Sources produce typed frames; `BehaviorMixer` composes them; `AvatarController` alone
+   writes the procedural layer. Wrong: `GestureEngine → bone.rotation`, `EmotionAnalyzer → Avatar.setExpression()`,
+   `LipSync → vrm.expressionManager`.
+3. **Audio and rendering are isolated** *(tested)*. Audio code (`avatar/src/audio/**`, the offscreen document) does
+   not import `Avatar`, `AvatarController`, Three.js or three-vrm. Rendering code never receives raw PCM,
+   `AudioNode`, `AudioContext` or `MediaStream`. Only compact numeric frames cross the boundary.
+4. **Gesture code is renderer-free** *(tested)*. `avatar/src/avatar/gesture/` imports no Avatar, AvatarController,
+   three or three-vrm, not even as types. `GestureEngine` emits `GestureFrame`s; it never touches bones.
+5. **ChatGPT DOM is isolated** *(tested)*. All ChatGPT selectors and DOM knowledge live in `ChatGPTAdapter`
+   (`CHATGPT_SELECTORS`). Selector breakage is fixed there and nowhere else.
+6. **One conversation-state resolver** *(tested)*. Audio processors emit signals; only `ConversationSignalResolver` (extension
+   content script) calls `controller.setState()`.
+7. **Lip sync owns articulation only**: visemes `aa ih ou ee oh`. Not blink, not emotion, not state, not gestures.
+   Emotion may bias the face but never overwrites visemes. The user's voice never drives the mouth.
+8. **The nod belongs to `GestureEngine`** *(tested)*. `UserReactionMapper` reports utterance boundaries (`utteranceEnds`
+   counter, `lastUtteranceDuration`); it does not animate the head.
+9. **React, don't mirror.** User energy, pitch and emotion map to bounded attentiveness (`REACTION_LIMITS`, emotion
+   mix bounds), never copied onto the avatar.
+10. **No hidden STT.** Nothing in lip sync, state, prosody, emotion or gestures depends on transcription.
+11. **Assistant and user audio are never mixed before analysis.** Tab capture and microphone are separate pipelines.
+12. **No microphone feedback path.** The mic is never connected to `AudioContext.destination`; the user-voice worklet
+    node has zero outputs (checked in `UserVoicePipeline.link()`).
+13. **Fail soft.** An optional part failing must not break ChatGPT or basic rendering:
+    viseme analyser fails → amplitude lip sync; emotion model fails → prosody heuristics (`fallback` mode);
+    mic denied or missing → assistant-only avatar; selector drift → ChatGPT stays usable, avatar uses fallback
+    placement.
+14. **No raw audio across extension contexts** *(tested)*. Frames (`LipSyncFrame`, `UserVoiceFrame`, `EmotionFrame`, status)
+    travel over the typed protocol (`PROTOCOL_VERSION` in `extension/src/shared/messages.ts`). PCM chunks for the
+    local model stay inside the offscreen document.
+15. **Executable code is local.** No remote JS/WASM. The only network fetch is the pinned emotion model download.
+16. **Delta-time everywhere.** Animation integrates `delta`; discrete events split delta at their boundary, so
+    30/60/120 FPS give the same result.
+
+Do not delete or weaken architecture tests because they make a new implementation inconvenient.
+
+## 5. Implemented subsystems
+
+Details, APIs and tunables: [avatar/README.md](avatar/README.md) and [extension/README.md](extension/README.md).
+
+### 5.1 Rendering (avatar core)
+
+Three.js WebGL renderer with a transparent canvas, VRM 1.0 loading with VRMUtils optimisations, normalized humanoid
+bones, expressions, lookAt and spring bones. Portrait framing (head, shoulders, upper torso) is derived from the head
+bone, with a fallback for models without one. `REST_POSE` (`avatar/src/config.ts`) lowers the T-pose arms; procedural
+motion returns to it, not to the T-pose. The bundled model is pixiv's VRM 1.0 sample
+(`avatar/public/models/avatar.vrm`, VRM Public License 1.0).
+
+### 5.2 Pose layering
+
+`Avatar` composes two layers once per frame. **Manual**: `REST_POSE`, manual expressions and bone rotations, debug
+controls. **Procedural**: idle × state profile + mouth + reaction + emotion + gestures, written only via
+`setProcedural`. Rotations add; `blink`, visemes and emotion presets combine as `max(manual, procedural)`.
+The gesture layer is clamped to `GESTURE_LIMITS`, the procedural sum to `POSE_LIMITS`; the manual layer is not
+clamped. VRM presets with `overrideMouth`/`overrideBlink: blend` are pre-compensated so an active emotion doesn't
+weaken visemes or blink; presets that `block` get no procedural emotion.
+
+### 5.3 AvatarController and conversation state
+
+`AvatarController` is the public API of the avatar subsystem. It exists before the VRM is loaded
+(`attachAvatar()` later), so states set during loading are kept. States: `idle`, `listening`, `thinking`,
+`speaking`. Each state is a profile (head/gaze/breath multipliers, head/gaze offsets, lean, assistant/user emotion
+weights) in `AvatarStateProfiles.ts`; transitions are smoothstep blends over `STATE_TRANSITION_DURATION` (0.35 s),
+continuous across mid-transition changes; re-setting the target is a no-op. State is not emotion
+(`thinking ≠ sad`, `speaking ≠ happy`).
+
+### 5.4 Conversation signal resolution (extension)
+
+`ConversationSignalResolver` combines voice-UI presence, assistant audio activity and user speech:
+voice UI closed → `idle`; user speaking → `listening` (an interruption counts only after 300 ms of user speech,
+an echo guard); assistant audio → `speaking` (held 450 ms); user just stopped → `thinking` after 200 ms, back to
+`listening` after 6 s without a reply; otherwise `listening`.
+
+### 5.5 Procedural idle
+
+Breathing, automatic blink with occasional double blink, head micro-motion, gaze drift. Blink combines as
+`max(manual, procedural)`; state changes never reset or reopen a blink. Gaze uses a lookAt proxy (camera target +
+procedural offset), so eyes hold contact while the head moves.
+
+### 5.6 Assistant lip sync
+
+`AudioInput` (file, mic, test signal, external node, `MediaStream`) feeds one `AnalyserNode` (fftSize 1024).
+
+- **Amplitude** (`AmplitudeLipSync`): RMS → dBFS → noise gate → level mapping → exact attack/release follower →
+  mouth openness. Always present; the fallback and the loudness source.
+- **Visemes** (`VisemeLipSync`): an analyser gives the *shape* (`aa ih ou ee oh`), amplitude gives the *opening*;
+  silence forces the mouth closed. Analysers are pluggable behind `VisemeAnalyzer`:
+  **HeadAudio** (default; MFCC + Gaussian prototypes, English model) and **wLipSync** (uLipSync MFCC matching in
+  WASM, one-speaker example profile). Creation failure, missing asset or worklet error → amplitude.
+
+In the extension the offscreen document runs this on the captured tab audio and sends `LipSyncFrame`s at 30 Hz;
+the content script interpolates them and closes the mouth if frames stop for 250 ms.
+
+### 5.7 User voice (optional, microphone)
+
+Opt-in per browser session. The mic (`echoCancellation: true`, `noiseSuppression: true`, `autoGainControl: false`)
+is analysed in an AudioWorklet: `VoiceActivityDetector` (tracked noise floor, 12/6 dB margins, 100 ms attack, 300 ms
+hangover), `PitchDetector` (McLeod, 60–800 Hz, `null` when unvoiced/low confidence), `PitchBaseline` (median of the
+first ~1.5 s voiced speech, then ~40 s log-domain average; relative pitch in semitones). Only `UserVoiceFrame`
+numbers leave the worklet (25 Hz). `UserReactionMapper` turns them into a bounded `UserReactionFrame`; reactions are
+muted while the assistant speaks.
+
+### 5.8 Prosody and emotion (both channels)
+
+One `ProsodyEmotionAnalyzer` instance per channel (user, assistant per tab), same code. Heuristic features: energy,
+pitch lift and variation, speech-rate proxy, spectral centroid/roll-off, ZCR, voiced ratio, pauses. Output
+`EmotionFrame` (valence, arousal, energy, tension, pitch lift/variation, confidence, `valenceConfidence`, `mode`)
+at 8 Hz. Heuristic valence confidence is capped at 0.25 (valence from prosody alone is near chance).
+
+`EmotionChannels` follows both channels; `BehaviorMixer` maps them (`DEFAULT_EMOTION_MIX`, all subtle), weighted by
+the state profile (speaking: assistant 1 / user 0; listening: assistant 0.15 / user 1) and confidence. The assistant
+channel drives self-expression (face, brows, head/gaze motion, posture, gesture energy); the user channel drives
+attentive reaction.
+
+`mode` values: `heuristic` (no model), `ml-webgpu` / `ml-wasm` (model fused in), `fallback` (model failed; rules only).
+
+### 5.9 Local emotion model (optional)
+
+- Model `omote-ai/distilhubert-ser`, artifact `distilhubert_ser_int8.onnx` (~50.6 MB), pinned to an immutable
+  Hugging Face revision and verified by exact size + SHA-256. **Technical source of truth:
+  [`extension/src/emotion/EmotionModelManifest.ts`](extension/src/emotion/EmotionModelManifest.ts)**; the values are
+  listed once in [extension/README.md](extension/README.md#emotion-model).
+- Installed from the extension popup in one click: download → size check → SHA-256 → IndexedDB → ONNX Runtime
+  initialisation in the offscreen document → self-test → ready. Bytes live in IndexedDB
+  (`prosopon-emotion-models`), metadata (id, revision, sha256, installedAt, enabled) in `chrome.storage.local`.
+  Model bytes never go to `chrome.storage`.
+- **Disable** keeps the verified bytes (re-enable without download); **Remove** deletes bytes and metadata.
+- Inference: WebGPU → WASM (single-threaded, packaged `ort-wasm-simd-threaded.jsep.wasm`) → heuristic. A load
+  timeout (30 s) or 3 failed inferences in a row turn every channel to `fallback`.
+- Embedded build (`npm run build:extension:embedded`) packages the artifact inside the extension instead of
+  downloading it.
+- After installation inference is local and works offline.
+
+### 5.10 Gestures
+
+`avatar/src/avatar/gesture/`: `Gesture.ts` (contracts), `GestureConfig.ts` (amplitudes, rates, limits),
+`GestureEngine.ts`. Types: nod, double nod, head tilt, body shift, shoulder shift, hand emphasis. One primary gesture
+at a time; lifecycle `prepare → attack → hold → release`; Poisson rates per state (frame-rate independent),
+modulated by the assistant's arousal while speaking; randomised cooldown; repeat penalty. Priority:
+forced/debug > boundary (nod after a user utterance) > speaking emphasis > ambient. Interruption or cancel releases
+in 150–200 ms, never snaps. Hand emphasis is scheduled only while the assistant speaks and never while the user
+speaks. Missing bones are skipped (no shoulders → shoulder shift becomes a chest roll).
+
+### 5.11 Chrome extension runtime
+
+MV3, Chrome 116+, active only on `https://chatgpt.com/*`.
+
+| Context | Owns | Never |
+|---|---|---|
+| service worker | per-tab enable state (`TabSessions`), `tabCapture` stream ids, offscreen lifecycle, mic opt-in, emotion model installer, message routing | DOM, audio analysis, Three.js |
+| offscreen document | tab + mic `MediaStream`s, AudioContexts, worklets, lip sync, VAD, pitch, prosody, model inference | Three.js, VRM, Avatar, ChatGPT DOM |
+| content script | `ChatGPTAdapter`, `AvatarOverlay` (shadow root), `AvatarController`, `ConversationSignalResolver`, `FrameMouthSource` | audio nodes, PCM, streams |
+| popup | avatar on/off for the active tab, emotion model install/enable/disable/remove | analysis, rendering |
+| permission page | one-time microphone grant for the extension origin | analysis |
+
+The manifest content script is ~4 kB and inert until enabled; Three.js and the avatar runtime are imported from
+`web_accessible_resources` only on activation. Tab audio is captured with `chrome.tabCapture` and played back from
+the offscreen document so the user still hears ChatGPT. The content script connects a Port directly to the offscreen
+document, so frames bypass the service worker. The service worker is stateless across restarts: it rebuilds state
+from the captures the offscreen document still holds.
+
+User-facing controls, all independent states (do not conflate them):
+
+- **Avatar** for the current tab: popup → *Enable avatar* / *Disable avatar*.
+- **Microphone reactions**: right-click the toolbar icon → *Microphone reactions* (stored in
+  `chrome.storage.session`, off after a browser restart). The mic is open only while this is on **and** at least one
+  tab is enabled.
+- **Emotion model**: popup → *Install & Enable emotions* / *Enable* / *Disable* / *Remove* / *Retry* / *Cancel*.
+
+Permissions: `tabCapture`, `offscreen`, `scripting` (re-inject into open tabs after install/update), `contextMenus`
+(mic opt-in), `storage` (mic opt-in in `session`, model metadata in `local`); hosts `https://chatgpt.com/*`,
+`https://huggingface.co/*` (model download). CSP `script-src 'self' 'wasm-unsafe-eval'` for ONNX Runtime WASM.
+
+### 5.12 Privacy
+
+Tab audio, microphone audio and model inference are processed locally; raw audio is not uploaded or recorded. The
+only network request Prosopon makes is the one-time pinned model download (none in the embedded build).
+
+### 5.13 Development tooling
+
+- Sandbox (`avatar/`, `npm run dev`): lil-gui panels (Avatar, Lip Sync / Visemes, Emotion / Prosody, Gestures),
+  debug overlay, `window.__AVATAR_DEBUG__`, URL params `?analyzer=` and `?gestureSeed=`.
+- Extension development builds: diagnostics overlay, `window.__PROSOPON_DEBUG__` (content-script world),
+  page events `prosopon:debug` / `prosopon:gesture`, service-worker E2E hook. None exist in production builds.
+- Tests: Vitest unit + architecture tests in both packages; Playwright E2E for the sandbox and for the unpacked
+  extension (real tab capture, fake microphone, WebGPU via SwiftShader).
+
+Debug APIs are development-only and must not become runtime dependencies.
+
+## 6. Configuration and options
+
+| Option | Where | Default |
+|---|---|---|
+| Viseme analyser | sandbox `?analyzer=none\|headaudio\|wlipsync`; extension `AUDIO_RUNTIME_CONFIG` | `headaudio` |
+| Monitor delay (align audio to mouth) | `AUDIO_RUNTIME_CONFIG.monitorDelay` (offscreen) | 0 (off) |
+| Resolver timings | `ConversationSignalResolver` config | see 5.4 |
+| Emotion analyser / mix | `DEFAULT_PROSODY_EMOTION_CONFIG`, `DEFAULT_EMOTION_MIX` | subtle, synthetic-tuned |
+| Gesture amplitudes / rates | `GESTURE_CONFIG` | reasoned, not visually tuned |
+| Embedded model build | `PROSOPON_EMBED_MODEL=1` (`build:extension:embedded`) | off |
+| Docker file watching | `WATCH_POLLING=true` | off |
+
+## 7. Known limitations
+
+- **ChatGPT selector drift.** `CHATGPT_SELECTORS` were checked against production on 2026-09-26 and will drift.
+  Repair only in `ChatGPTAdapter` (+ its E2E fixture).
+- **Echo and crosstalk.** No custom AEC by design. On speakers the assistant can leak into the mic; mitigations are
+  browser echo cancellation, the 300 ms interruption minimum and muting user reactions while the assistant speaks.
+  Whether ChatGPT's own echo cancellation still works while the tab is captured is unverified. Headphones are the
+  safe setup.
+- **Calibration.** VAD, pitch, prosody and gesture thresholds are tuned on synthetic signals; real mic / real
+  ChatGPT voice calibration is manual ([docs/](docs/)).
+- **Viseme quality.** HeadAudio's model is English; the wLipSync profile is one speaker. Neither is validated on
+  Russian or ChatGPT voices.
+- **Latency.** Mouth lags audio by the analysis window + frame interval; `monitorDelay` trades it for audible delay.
+- **Emotion quality.** The model is an animation control signal, not psychological truth; arousal is more reliable
+  than valence; it is trained on acted speech. The output mapping of the installed model (see
+  [extension/README.md](extension/README.md#emotion-model)) has not been validated against real model outputs.
+- **Size.** ~50.6 MB model in IndexedDB plus ONNX Runtime WASM (~28 MB) in every package.
+- **Web Store review.** The default build downloads a model graph from Hugging Face (no executable code). If that
+  is a review problem, ship the embedded build.
+- **VRM variation.** `overrideMouth`/`overrideBlink`, expression strengths, bone proportions and spring-bone setups
+  differ per model; per-model calibration is expected.
+- **Device changes.** A disappearing microphone ends the user pipeline; it does not reopen when the device returns.
+- **Test gaps.** The emotion model installer (download, integrity, storage) has no automated tests, and the
+  extension's local-model E2E tests do not exercise the installed-model path (see
+  [extension/README.md](extension/README.md#tests)). The real toolbar/popup user-gesture path and the live
+  chatgpt.com DOM are not covered by E2E.
+
+## 8. Not implemented
+
+Do not assume these exist:
+
+- camera / visual tracking (MediaPipe, face landmarks, user smile, head pose, gaze);
+- semantic understanding (transcripts, text sentiment, LLM intent, semantic emphasis);
+- semantic gestures (pointing, sizing, counting);
+- full-body generative motion (motion diffusion, motion matching, mocap generation);
+- custom echo cancellation;
+- speaker identification / diarization;
+- long-term personalisation (pitch baseline is per session);
+- other voice providers (only ChatGPT has an adapter);
+- Chrome Web Store packaging (store assets, privacy copy, release CI).
+
+## 9. Future directions (not commitments)
+
+- Real-world hardening: several ChatGPT voices; Russian, Ukrainian, English, Spanish; headphones vs laptop/external
+  speakers; different mics; long sessions; tab suspend/resume; device disconnect/reconnect.
+- Camera reaction layer: `camera → MediaPipe → user visual state → ReactionSource → BehaviorMixer`, never wired to
+  VRM directly.
+- Better multilingual lip sync (another analyser behind `VisemeAnalyzer`, not a second pipeline).
+- Semantic gesture hints (agreement, question, emphasis, enumeration, direction, size) as another input to
+  `GestureEngine`.
+- Smaller/faster emotion model and ORT footprint.
+- Web Store productionisation: privacy copy, permission audit, icons, versioning, store package, model distribution
+  policy, release CI.
+
+## 10. Source-of-truth priority
+
+```text
+current code > architecture tests > PRODUCT.md > subsystem READMEs / docs > old user stories
+```
+
+User stories (US-00x) are historical intent, not architecture. Fix documentation that disagrees with the code in
+the same change that notices it (see [AGENTS.md](AGENTS.md)).
