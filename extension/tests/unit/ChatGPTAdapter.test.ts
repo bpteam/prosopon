@@ -131,6 +131,13 @@ describe('ChatGPTAdapter', () => {
 });
 
 describe('ChatGPTAdapter: assistant reply text (semantic layer input)', () => {
+  const conversation = (): HTMLElement => {
+    const root = document.createElement('div');
+    root.setAttribute('role', 'region');
+    root.setAttribute('aria-label', 'Conversation');
+    document.body.append(root);
+    return root;
+  };
   const reply = (html: string, id?: string): HTMLElement => {
     const m = document.createElement('div');
     m.dataset.messageAuthorRole = 'assistant';
@@ -178,6 +185,48 @@ describe('ChatGPTAdapter: assistant reply text (semantic layer input)', () => {
     expect(adapter.readLatestReply()!.id).not.toBe(a.id);
   });
 
+  // Production Voice Mode (observed 2026-09-26): it does not use data-message-author-role or .markdown.
+  // The sr-only heading is role evidence; the turn wrapper and markdown-style body carry durable data attributes.
+  const voiceReply = (text: string, id: string): HTMLElement => {
+    const turn = document.createElement('div');
+    turn.dataset.contentSearchUnitKey = `fallback-turn-4:1:assistant`;
+    turn.innerHTML = `<h4 data-conversation-role="assistant">ChatGPT said:</h4>
+      <div data-chatgpt-selection-message-id="${id}">
+        <div data-markdown-text-style="assistant-message"><p>${text}</p></div>
+      </div>`;
+    document.body.append(turn);
+    return turn;
+  };
+
+  it('reads a live Voice Mode assistant turn and its stable nested message id', () => {
+    const turn = voiceReply('Но тут есть важный нюанс.', 'voice-message-7');
+    const adapter = new ChatGPTAdapter(document);
+    expect(adapter.readLatestReply()).toEqual({ id: 'voice-message-7', text: 'Но тут есть важный нюанс.' });
+
+    turn.querySelector('p')!.textContent = 'Но тут есть важный нюанс. Есть три варианта.';
+    expect(adapter.readLatestReply()).toEqual({ id: 'voice-message-7', text: 'Но тут есть важный нюанс. Есть три варианта.' });
+    expect(adapter.debugSnapshot()).toMatchObject({
+      assistantMessageSelector: '[data-content-search-unit-key$=":assistant"]',
+      messageBodySelector: '[data-markdown-text-style="assistant-message"]',
+      revision: 2,
+    });
+  });
+
+  it('chooses the newest turn across text-chat and Voice Mode selector families', () => {
+    reply('<p>Older text-chat reply.</p>', 'text-old');
+    voiceReply('Newer Voice reply.', 'voice-new');
+    expect(new ChatGPTAdapter(document).readLatestReply()).toEqual({ id: 'voice-new', text: 'Newer Voice reply.' });
+  });
+
+  it('ignores a Voice Mode user transcript even when it is newer than the assistant turn', () => {
+    voiceReply('Assistant reply.', 'voice-assistant');
+    const user = document.createElement('div');
+    user.dataset.contentSearchUnitKey = 'fallback-turn-5:0:user';
+    user.textContent = 'Newest user transcript.';
+    document.body.append(user);
+    expect(new ChatGPTAdapter(document).readLatestReply()).toEqual({ id: 'voice-assistant', text: 'Assistant reply.' });
+  });
+
   it('observeReplies fires on streaming text changes and stops on dispose', async () => {
     const m = reply('<p>Н</p>');
     const adapter = new ChatGPTAdapter(document);
@@ -191,5 +240,54 @@ describe('ChatGPTAdapter: assistant reply text (semantic layer input)', () => {
     m.querySelector('p')!.append(' есть нюанс.');
     await flush();
     expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it('prefers the canonical production conversation region over an out-of-thread mirror', () => {
+    const root = conversation();
+    const canonical = document.createElement('div');
+    canonical.dataset.messageAuthorRole = 'assistant';
+    canonical.dataset.messageId = 'canonical';
+    canonical.innerHTML = '<div class="markdown"><p>Current reply.</p></div>';
+    root.append(canonical);
+    const mirror = reply('<p>Stale accessibility mirror.</p>', 'mirror');
+
+    const adapter = new ChatGPTAdapter(document);
+    expect(adapter.readLatestReply()).toMatchObject({ id: 'canonical', text: 'Current reply.' });
+    expect(adapter.debugSnapshot()).toMatchObject({
+      conversationRootFound: true,
+      conversationRootSelector: '[role="region"][aria-label="Conversation"]',
+      activeAssistantTurn: 'canonical',
+      revision: 1,
+      assistantMessageSelector: '[data-message-author-role="assistant"]',
+      messageBodySelector: '.markdown',
+    });
+    mirror.remove();
+  });
+
+  it('keeps semantic observation scoped to the conversation and rebinds after SPA replacement', async () => {
+    const first = conversation();
+    const adapter = new ChatGPTAdapter(document);
+    const onChange = vi.fn();
+    const stop = adapter.observeReplies(onChange);
+    onChange.mockClear(); // initial bind is intentionally dirty
+
+    document.getElementById('app')!.append(document.createElement('aside'));
+    await flush();
+    expect(onChange).not.toHaveBeenCalled();
+
+    first.append(document.createElement('p'));
+    await flush();
+    expect(onChange).toHaveBeenCalledTimes(1);
+    onChange.mockClear();
+
+    const replacement = document.createElement('div');
+    replacement.setAttribute('role', 'region');
+    replacement.setAttribute('aria-label', 'Conversation');
+    first.replaceWith(replacement);
+    await flush();
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(adapter.debugSnapshot().observerConnected).toBe(true);
+    stop();
+    expect(adapter.debugSnapshot().observerConnected).toBe(false);
   });
 });

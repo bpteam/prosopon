@@ -412,9 +412,13 @@ Debug APIs are development-only and must not become runtime dependencies.
   chatgpt.com DOM are not covered by E2E.
 - **Layout on real ChatGPT.** The full-viewport overlay, the default Waist placement and the dev windows are E2E-
   tested on a fixture page only; how they sit next to ChatGPT's real composer and sidebar is a manual check.
-- **Semantic layer on real ChatGPT.** The assistant-message selector (`data-message-author-role="assistant"`) and
-  whether voice mode renders the reply text while it speaks are unverified against production; if not, semantics
-  stay silent in voice mode (text chat still works). Timing is a text-clock estimate (fixed chars/s, no alignment):
+- **Semantic layer on real ChatGPT.** On 2026-09-26, the logged-out shell used
+  `[role="region"][aria-label="Conversation"]`; authenticated Voice Mode used the separate transcript path
+  `[data-chatgpt-conversation-selection-target="true"]` →
+  `[data-content-search-unit-key$=":assistant"]` → `[data-markdown-text-style="assistant-message"]` (with a
+  nested `data-chatgpt-selection-message-id`). The Voice transcript grows while the assistant speaks; the adapter
+  observes text-node and child-node updates inside that root. Timing is a text-clock estimate (fixed chars/s, no
+  alignment):
   an accent can land a second early or late. The vocabulary is validated on hand-written ChatGPT-style replies, not
   on real ones; rule-based cues miss irony, implicit contrast and anything not in the lists. No brow accent. Manual
   checks: [docs/semantic-calibration.md](docs/semantic-calibration.md).

@@ -7,6 +7,33 @@ Rules: [AGENTS.md](../AGENTS.md).
 The vocabulary, thresholds, gesture mapping and the 14 chars/s speech rate were set on hand-written ChatGPT-style
 replies; nothing here has seen a real ChatGPT reply or real ChatGPT voice. Budget: ~30 minutes.
 
+## Production DOM investigation (2026-09-26)
+
+The production `https://chatgpt.com/` shell was inspected read-only while logged out. Its conversation subtree is a
+`div[role="region"][aria-label="Conversation"]`, containing a conversation `section` and an `ol` transcript.
+
+An authenticated Voice Mode session was then inspected after several spoken turns. It uses a different transcript
+path: the canonical root is `div[data-chatgpt-conversation-selection-target="true"]`; assistant turns are
+`[data-content-search-unit-key$=":assistant"]`, identified by a child
+`h4[data-conversation-role="assistant"]`. The assistant body is
+`[data-markdown-text-style="assistant-message"]`, and its immutable id is the descendant's
+`data-chatgpt-selection-message-id`. The ordinary `[data-message-author-role="assistant"]` and `.markdown`
+selectors matched **zero** Voice Mode nodes. The root now scopes `ChatGPTAdapter`'s observer, preventing a
+voice-overlay/accessibility mirror from winning and allowing rebind after SPA replacement.
+
+User and assistant turns are distinct in the same transcript: user speech is
+`fallback-turn-N:0:user`, while assistant speech is `fallback-turn-N:1:assistant`. The adapter selects only the
+`:assistant` suffix; user streaming text is intentionally observed only as a DOM mutation and never read or sent to
+the semantic subsystem.
+
+The Voice transcript is incremental: during assistant speech the message grows in place rather than appearing only
+after speech finishes (observed in the live session). `ChatGPTAdapter` observes both text-node changes and child-node
+changes inside the transcript root, so either React update shape becomes a bounded semantic revision. The exact
+low-level React mutation form (one text node vs appended/replaced spans) was not recorded, so the adapter deliberately
+does not depend on either. The fixture streams text in that body so the integration path has a regression test.
+`window.__PROSOPON_DEBUG__.chatgpt` reports the root/turn/body selectors, current text revision and observer state
+during a development build.
+
 ## 1. Reply text reaches the analyzer (blocking)
 
 `cd extension && npm run build:dev`, enable Prosopon on chatgpt.com, turn **Developer mode** on, open Developer

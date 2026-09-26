@@ -20,7 +20,7 @@
   <body>
     <!-- Mimics the parts of chatgpt.com that ChatGPTAdapter knows; see CHATGPT_SELECTORS. -->
     <div id="app">
-      <div id="thread"><p>Fixture conversation</p></div>
+      <div id="thread" data-chatgpt-conversation-selection-target="true"><p>Fixture conversation</p></div>
       <form id="composer"><textarea aria-label="Message"></textarea><button type="button" id="open-voice">Voice</button></form>
     </div>
     <script>
@@ -76,6 +76,45 @@
           body.className = 'markdown prose';
           message.append(body);
           document.getElementById('thread').append(message);
+          const tokens = paragraphs.map((p) => p.match(/\S+\s*/g) ?? []);
+          return new Promise((resolve) => {
+            let para = -1;
+            let i = 0;
+            let node = null;
+            const step = () => {
+              if (!node || i >= tokens[para].length) {
+                para++;
+                i = 0;
+                if (para >= tokens.length) return resolve();
+                const p = document.createElement('p');
+                node = document.createTextNode('');
+                p.append(node);
+                body.append(p);
+              }
+              node.data += tokens[para][i++];
+              setTimeout(step, ms);
+            };
+            step();
+          });
+        },
+        /**
+         * Production Voice Mode transcript shape observed on 2026-09-26. Its assistant turn is not the regular
+         * data-message-author-role/.markdown pair: an sr-only semantic heading labels the turn and a data-markdown
+         * body streams in place under an immutable selection message id.
+         */
+        streamVoiceReply(id, paragraphs, ms = 20) {
+          const turn = document.createElement('div');
+          turn.dataset.contentSearchUnitKey = `fallback-turn-${document.querySelectorAll('[data-content-search-unit-key]').length}:1:assistant`;
+          const heading = document.createElement('h4');
+          heading.dataset.conversationRole = 'assistant';
+          heading.textContent = 'ChatGPT said:';
+          const selection = document.createElement('div');
+          selection.dataset.chatgptSelectionMessageId = id;
+          const body = document.createElement('div');
+          body.dataset.markdownTextStyle = 'assistant-message';
+          selection.append(body);
+          turn.append(heading, selection);
+          document.getElementById('thread').append(turn);
           const tokens = paragraphs.map((p) => p.match(/\S+\s*/g) ?? []);
           return new Promise((resolve) => {
             let para = -1;

@@ -48,7 +48,7 @@ import type { DevBridge, DevSample } from '../ui/dev/DevBridge';
 import { DevModeSwitch } from './DevModeSwitch';
 import { ManualControls } from '../ui/dev/ManualControls';
 import { AvatarOverlay } from './AvatarOverlay';
-import { ChatGPTAdapter, type ConversationUiAdapter, type VoiceUiSnapshot } from './ChatGPTAdapter';
+import { ChatGPTAdapter, type ChatGPTAdapterDebugSnapshot, type ConversationUiAdapter, type VoiceUiSnapshot } from './ChatGPTAdapter';
 import { ConversationSignalResolver, type ConversationSignals } from './ConversationSignalResolver';
 import { SemanticFeed } from './SemanticFeed';
 
@@ -132,6 +132,8 @@ export interface ProsoponDebug {
   gesture: GestureEngine;
   /** Semantic layer (reply text → intents); null if it failed to start. */
   semantic: SemanticFeed | null;
+  /** ChatGPT DOM capture state; null when a test/custom integration adapter is in use. */
+  chatgpt: ChatGPTAdapterDebugSnapshot | null;
   /** Camera API (presets, corrections, presentation). */
   stage: AvatarStage;
 }
@@ -321,6 +323,9 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
       },
       gesture: gestures,
       semantic,
+      get chatgpt() {
+        return adapter instanceof ChatGPTAdapter ? adapter.debugSnapshot() : null;
+      },
       stage,
     };
   }

@@ -4,8 +4,8 @@ import { expect, root, tabIdOf, test, toggle } from './extension';
 /**
  * Semantic layer end to end on the fixture page: a streamed assistant reply (fixture.streamReply, the reply DOM
  * ChatGPTAdapter expects) → ChatGPTAdapter.readLatestReply → SemanticFeed → GestureEngine.pushSemantic. Observed
- * through the development build's data-semantic-* attributes. The real chatgpt.com reply DOM (text and voice mode)
- * is a manual check: docs/semantic-calibration.md.
+ * through the development build's data-semantic-* attributes. The fixture contains the minimal production Voice
+ * Mode transcript shape observed in docs/semantic-calibration.md.
  */
 
 const num = async (host: Locator, attr: string) => Number(await host.getAttribute(attr));
@@ -46,4 +46,18 @@ test('a streamed reply becomes semantic cues and intents; the reply already on t
   await chatgpt.evaluate(() => (window as any).fixture.streamReply('r2', ['Однако это важно. Поэтому нет.'], 5));
   await chatgpt.waitForTimeout(500);
   expect(await num(host, 'data-semantic-cues')).toBe(cues);
+});
+
+test('a production-shaped Voice Mode transcript streams into the semantic path once', async ({ serviceWorker, chatgpt }) => {
+  await toggle(serviceWorker, await tabIdOf(serviceWorker, chatgpt));
+  const host = root(chatgpt);
+  await expect(host).toHaveAttribute('data-avatar-loaded', 'true', { timeout: 30_000 });
+  await chatgpt.evaluate(() =>
+    document.dispatchEvent(new CustomEvent('prosopon:semantic', { detail: { probabilityScale: 4, pacing: false } })),
+  );
+  await chatgpt.evaluate(() =>
+    (window as any).fixture.streamVoiceReply('voice-r1', ['Но тут есть важный нюанс. Поэтому начнём с первого варианта.']),
+  );
+  await expect.poll(() => num(host, 'data-semantic-cues'), { timeout: 10_000 }).toBeGreaterThanOrEqual(2);
+  await expect.poll(() => num(host, 'data-semantic-intents'), { timeout: 10_000 }).toBeGreaterThanOrEqual(2);
 });

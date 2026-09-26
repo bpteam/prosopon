@@ -191,13 +191,15 @@ The service worker, offscreen, content, worklet, `ui/` and `popup/` boundaries a
   [../avatar/README.md](../avatar/README.md#user-voice-contracts)); samples never leave the render thread, only
   frames do. The worklet node has zero outputs: every edge of the mic graph is checked in `UserVoicePipeline.link()`.
   Reactions are muted while the assistant speaks (the mic may be hearing it). The mouth never follows the user.
-- **Semantic layer.** `ChatGPTAdapter.observeReplies` only marks the reply dirty; the render loop's
-  `SemanticFeed.update(delta, voiceUiActive, assistantSpeaking)` reads `readLatestReply()` (latest
-  `[data-message-author-role="assistant"]`, its `.markdown` body rendered to light Markdown: `1.`/`-` items, `#`
-  headings, `**bold**`, code blocks emptied, buttons/tables/hidden nodes skipped) at most every 125 ms after a
-  mutation. The reply present at activation is ignored; a reply unchanged for 2.5 s is complete. With the voice UI
-  open, `SemanticPacer` releases intents at the estimated spoken position (assistant audio time × 14 chars/s);
-  otherwise at once. An exception switches the feed off; the avatar continues. Analysis and decisions:
+- **Semantic layer.** `ChatGPTAdapter.observeReplies` observes the production conversation region and only marks
+  the reply dirty; a lightweight lifecycle observer rebinds it after an SPA replacement without making unrelated
+  page churn semantic input. The render loop's `SemanticFeed.update(delta, voiceUiActive, assistantSpeaking)` reads
+  `readLatestReply()` from that canonical thread (latest `[data-message-author-role="assistant"]`, its `.markdown`
+  body rendered to light Markdown: `1.`/`-` items, `#` headings, `**bold**`, code blocks emptied,
+  buttons/tables/hidden nodes skipped) at most every 125 ms after a mutation. The reply present at activation is
+  ignored; a reply unchanged for 2.5 s is complete. With the voice UI open, `SemanticPacer` releases intents at the
+  estimated spoken position (assistant audio time × 14 chars/s); otherwise at once. An exception switches the feed
+  off; the avatar continues. Analysis and decisions:
   [../avatar/README.md](../avatar/README.md#semantic-analyzer).
 - **Prosody & emotion.** Both channels use one `ProsodyEmotionAnalyzer` each (`ProsodyChannel`: the assistant's is
   tapped off the tab capture, one per tab; the user's off the mic pipeline). The content script feeds the frames
@@ -296,16 +298,22 @@ IndexedDB. The `PROSOPON_EMBED_MODEL=1 …` script syntax needs a POSIX shell (u
   (`{enabled, pacing, probabilityScale}`).
 - Semantic attributes on the overlay host: `data-semantic-enabled`, `data-semantic-mode` (`speech` / `immediate` /
   `off`), `data-semantic-cues`, `data-semantic-intents`, `data-semantic-accepted`, `data-semantic-last` (cue types of
-  the last intent). `__PROSOPON_DEBUG__.semantic` is the `SemanticFeed`.
+  the last intent). `__PROSOPON_DEBUG__.semantic` is the `SemanticFeed`; `__PROSOPON_DEBUG__.chatgpt` is a
+  read-only capture snapshot (conversation root and selector, active turn id, revision, serialised reply text, and
+  observer state) for selector-drift diagnosis.
 - Calibration procedures: [../docs/emotion-calibration.md](../docs/emotion-calibration.md) (prosody/emotion),
   [../docs/gesture-calibration.md](../docs/gesture-calibration.md) (gestures),
   [../docs/semantic-calibration.md](../docs/semantic-calibration.md) (reply text, timing, semantic accents).
 
 ## Known limitations
 
-- **ChatGPT selectors** in `CHATGPT_SELECTORS` (`ChatGPTAdapter.ts`) were checked against production on 2026-09-26
-  and will drift. If nothing matches, the avatar stays where the layout puts it and the orb stays visible. Update them from
-  DevTools; the E2E fixture (`tests/e2e/fixtures/chatgpt.html`) mirrors them.
+- **ChatGPT selectors** in `CHATGPT_SELECTORS` (`ChatGPTAdapter.ts`) will drift. On 2026-09-26 the logged-out
+  production shell exposed `[role="region"][aria-label="Conversation"]`; authenticated Voice Mode used
+  `[data-chatgpt-conversation-selection-target="true"]` →
+  `[data-content-search-unit-key$=":assistant"]` → `[data-markdown-text-style="assistant-message"]` with its
+  nested `data-chatgpt-selection-message-id`. If nothing matches, the avatar stays where the layout puts it and the
+  orb stays visible. Update them from DevTools; the E2E fixture (`tests/e2e/fixtures/chatgpt.html`) mirrors the
+  verified minimum structure.
 - **Echo cancellation.** While captured, the tab's audio is played by the offscreen document. Whether ChatGPT's own
   echo cancellation still gets its reference signal is untested: on speakers, check that ChatGPT doesn't hear and
   interrupt itself.

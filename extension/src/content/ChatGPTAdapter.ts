@@ -31,6 +31,19 @@ export interface AssistantReply {
   text: string;
 }
 
+/** Read-only adapter diagnostics for live selector-drift investigations. No DOM node escapes the adapter. */
+export interface ChatGPTAdapterDebugSnapshot {
+  conversationRootFound: boolean;
+  /** Selector that found the root, when one did. */
+  conversationRootSelector: string | null;
+  activeAssistantTurn: string | null;
+  revision: number;
+  assistantMessageSelector: string | null;
+  messageBodySelector: string | null;
+  assistantText: string;
+  observerConnected: boolean;
+}
+
 export interface VoiceUiSnapshot {
   active: boolean;
   container: HTMLElement | null;
@@ -69,13 +82,20 @@ export const CHATGPT_SELECTORS = {
   /** Fallback evidence of a live session while the orb is momentarily unmounted (e.g. mid transition). */
   sessionControl: ['button[aria-label="End Voice" i]', 'button[aria-label*="voice focus mode" i]'],
   /**
-   * One assistant turn in the thread (text chat and, when ChatGPT shows it, the voice reply's text). NOT verified
-   * against production voice mode: `data-message-author-role` is the long-standing thread attribute; whether the
-   * voice reply's text is in the DOM while it is spoken is a manual check (docs/semantic-calibration.md).
+   * Production Voice Mode wraps its complete transcript in the first data selector; the logged-out shell exposes
+   * the ARIA-region fallback. Both are roots, not turn selectors: the assistant turn is identified below.
    */
-  assistantMessage: ['[data-message-author-role="assistant"]'],
-  /** The rendered Markdown inside an assistant message (the message element itself when absent). */
-  messageBody: ['.markdown', '[class*="markdown"]'],
+  conversationRoot: ['[data-chatgpt-conversation-selection-target="true"]', '[role="region"][aria-label="Conversation"]'],
+  /**
+   * One assistant turn. Text chat uses the long-standing role attribute. Production Voice Mode (2026-09-26) uses
+   * `data-content-search-unit-key="fallback-turn-N:1:assistant"` instead; its child h4 has
+   * `data-conversation-role="assistant"`. The turn key is a stable data contract, unlike the surrounding CSS.
+   */
+  assistantMessage: ['[data-message-author-role="assistant"]', '[data-content-search-unit-key$=":assistant"]'],
+  /** Rendered assistant text in text chat and the separate Voice Mode transcript, respectively. */
+  messageBody: ['.markdown', '[class*="markdown"]', '[data-markdown-text-style="assistant-message"]'],
+  /** Voice Mode keeps its immutable message UUID on this descendant, not on the turn wrapper. */
+  messageId: ['[data-chatgpt-selection-message-id]'],
 } as const;
 
 /** Attributes whose changes can show or hide the voice UI. `class` is left out: ChatGPT rewrites it constantly. */
@@ -177,42 +197,114 @@ export class ChatGPTAdapter implements ConversationUiAdapter {
   /** Ids for messages without `data-message-id` (kept per element, so a re-read gets the same id). */
   private readonly ids = new WeakMap<Element, string>();
   private nextId = 0;
+  private revision = 0;
+  private lastReplyKey: string | null = null;
+  private lastAssistantMessageSelector: string | null = null;
+  private lastMessageBodySelector: string | null = null;
+  private repliesObserverConnected = false;
 
   constructor(private readonly doc: Document = document) {}
 
   readLatestReply(): AssistantReply | null {
-    let message: Element | null = null;
-    for (const selector of CHATGPT_SELECTORS.assistantMessage) {
-      const all = this.doc.querySelectorAll(selector);
-      if (all.length) {
-        message = all[all.length - 1]!;
-        break;
-      }
-    }
+    const { message, selector: assistantMessageSelector } = this.findLatestAssistantMessage();
     if (!message) return null;
     let body: Element = message;
+    let messageBodySelector: string | null = null;
     for (const selector of CHATGPT_SELECTORS.messageBody) {
       const el = message.querySelector(selector);
       if (el) {
         body = el;
+        messageBodySelector = selector;
         break;
       }
     }
     let id = message.getAttribute('data-message-id');
     if (!id) {
+      for (const selector of CHATGPT_SELECTORS.messageId) {
+        id = message.querySelector(selector)?.getAttribute('data-chatgpt-selection-message-id') ?? null;
+        if (id) break;
+      }
+    }
+    if (!id) {
       id = this.ids.get(message) ?? `prosopon-${++this.nextId}`;
       this.ids.set(message, id);
     }
-    return { id, text: replyText(body) };
+    const text = replyText(body);
+    const key = `${id}\u0000${text}`;
+    if (key !== this.lastReplyKey) {
+      this.lastReplyKey = key;
+      this.revision++;
+    }
+    this.lastAssistantMessageSelector = assistantMessageSelector;
+    this.lastMessageBodySelector = messageBodySelector;
+    return { id, text };
   }
 
   observeReplies(onChange: () => void): () => void {
-    // The body, not a thread container: SPA navigation replaces those. Prosopon's own UI lives in shadow roots and
-    // is not seen. Only a flag is set per batch; reading and analysing happen at a bounded rate in the render loop.
-    const target = this.doc.body ?? this.doc.documentElement;
-    const observer = new MutationObserver(() => onChange());
-    observer.observe(target, { childList: true, subtree: true, characterData: true });
-    return () => observer.disconnect();
+    // Observe only the conversation subtree while it exists. A lightweight document observer only rebinds after
+    // ChatGPT's SPA replaces that subtree; it never marks semantic input dirty for unrelated page churn.
+    let observedRoot: Element | null = null;
+    let repliesObserver: MutationObserver | null = null;
+    const bind = () => {
+      const nextRoot = this.findConversationRoot().element ?? this.doc.body ?? this.doc.documentElement;
+      if (nextRoot === observedRoot) return;
+      repliesObserver?.disconnect();
+      observedRoot = nextRoot;
+      repliesObserver = new MutationObserver(() => onChange());
+      repliesObserver.observe(nextRoot, { childList: true, subtree: true, characterData: true });
+      onChange();
+    };
+    const lifecycle = new MutationObserver(bind);
+    lifecycle.observe(this.doc.documentElement, { childList: true, subtree: true });
+    this.repliesObserverConnected = true;
+    bind();
+    return () => {
+      lifecycle.disconnect();
+      repliesObserver?.disconnect();
+      this.repliesObserverConnected = false;
+    };
+  }
+
+  /** Safe to expose in a dev build: selector choices and serialised text, never elements. */
+  debugSnapshot(): ChatGPTAdapterDebugSnapshot {
+    const root = this.findConversationRoot();
+    const reply = this.readLatestReply();
+    return {
+      conversationRootFound: root.element !== null,
+      conversationRootSelector: root.selector,
+      activeAssistantTurn: reply?.id ?? null,
+      revision: this.revision,
+      assistantMessageSelector: this.lastAssistantMessageSelector,
+      messageBodySelector: this.lastMessageBodySelector,
+      assistantText: reply?.text ?? '',
+      observerConnected: this.repliesObserverConnected,
+    };
+  }
+
+  private findConversationRoot(): { element: Element | null; selector: string | null } {
+    for (const selector of CHATGPT_SELECTORS.conversationRoot) {
+      const element = this.doc.querySelector(selector);
+      if (element) return { element, selector };
+    }
+    return { element: null, selector: null };
+  }
+
+  private findLatestAssistantMessage(): { message: Element | null; selector: string | null } {
+    // The canonical thread wins over page-wide mirrors (for example accessibility or voice-overlay copies).
+    const root = this.findConversationRoot().element;
+    for (const scope of root ? [root, this.doc] : [this.doc]) {
+      let latest: { message: Element; selector: string } | null = null;
+      for (const selector of CHATGPT_SELECTORS.assistantMessage) {
+        const all = scope.querySelectorAll(selector);
+        for (const message of all) {
+          if (!latest || (latest.message.compareDocumentPosition(message) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0) {
+            latest = { message, selector };
+          }
+        }
+      }
+      if (latest) return latest;
+    }
+    return { message: null, selector: null };
   }
 
   isVoiceModeActive(): boolean {
