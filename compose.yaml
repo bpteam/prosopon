@@ -1,0 +1,31 @@
+services:
+  avatar:
+    build:
+      context: ./avatar
+      target: dev
+    ports:
+      # Keep host and container ports equal: the HMR client connects back to the page's port.
+      - "127.0.0.1:5173:5173"
+    environment:
+      # Set to true when file changes don't reach the container (Docker Desktop on Windows, some network FS).
+      WATCH_POLLING: ${WATCH_POLLING:-false}
+    volumes:
+      - ./avatar:/app
+      - avatar_node_modules:/app/node_modules
+
+  e2e:
+    profiles: [test]
+    build:
+      context: ./avatar
+      target: e2e
+    # Chromium runs out of /dev/shm with the default 64 MB.
+    ipc: host
+    environment:
+      CI: ${CI:-}
+    volumes:
+      - ./avatar:/app
+      - e2e_node_modules:/app/node_modules
+
+volumes:
+  avatar_node_modules:
+  e2e_node_modules:

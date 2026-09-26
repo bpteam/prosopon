@@ -14,6 +14,24 @@ Playwright needs Chromium: run `npx playwright install chromium` once, or point 
 with `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/path/to/chrome npm run test:e2e`. The lip sync e2e tests use Chromium's
 fake capture device and disable the autoplay gesture requirement (see `playwright.config.ts`).
 
+### Docker
+
+`compose.yaml` in the repo root runs the same commands without a local Node or Chromium. Sources are bind-mounted,
+`node_modules` lives in a named volume and is reinstalled by the entrypoint when `package-lock.json` changes.
+
+```bash
+docker compose up --build                          # dev server with HMR on http://localhost:5173/
+docker compose run --rm avatar npm test            # unit tests / typecheck in the dev container
+docker compose --profile test run --rm e2e         # Playwright e2e in mcr.microsoft.com/playwright
+WATCH_POLLING=true docker compose up               # when edits don't trigger HMR (Docker Desktop on Windows)
+```
+
+- The port is published on `127.0.0.1` only and must stay 5173 on both sides: the HMR client reconnects to the page's port.
+- Microphone input needs a secure context: `http://localhost` qualifies, a LAN IP over http does not.
+- Containers run as uid 1000. With a different host uid, files the containers write into `avatar/` (e.g. `test-results/`)
+  get the wrong owner.
+- The Playwright image tag in `Dockerfile` must match `@playwright/test` in `package-lock.json`.
+
 ## Architecture
 
 ```
