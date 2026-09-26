@@ -242,7 +242,9 @@ For the extension, `LipSyncFrame` carries the mouth across contexts and `FrameMo
   pitch lift/variation, syllable rate, brightness, pauses, voiced ratio) → rules → attack/release followers behind a
   0.04 hysteresis band, 8 Hz out. Arousal mixes an absolute scale with the channel's slow baseline
   (`baselineWeight`). Silence turns `active` off and returns everything to neutral over ~1 s. Heuristic valence
-  confidence is capped at 0.25. Defaults: `DEFAULT_PROSODY_EMOTION_CONFIG`.
+  confidence is capped at 0.25. The default weights prevent a calm but melodically variable Russian Voice answer
+  from reading as more aroused than a brighter, louder one; the regression uses the supplied Sol acoustic profile,
+  not an assumed browser voice identifier. Defaults: `DEFAULT_PROSODY_EMOTION_CONFIG`.
 - `EmotionModel` / `EmotionModelHost` / `OnnxEmotionModel`: optional local model (ONNX Runtime Web; WebGPU → WASM,
   single-threaded) fused into arousal/valence and `valenceConfidence`. The host serves any number of channels with
   one model; load timeout 30 s, inference timeout 5 s, 3 failures in a row → mode `fallback` (rules only). The spec

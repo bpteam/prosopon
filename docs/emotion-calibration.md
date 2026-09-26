@@ -6,6 +6,12 @@ Context: [PRODUCT.md §5.8](../PRODUCT.md#58-prosody-and-emotion-both-channels),
 The prosody/emotion analyser and the mapping were tuned on synthetic signals. These checks need your microphone, your room and ChatGPT's
 real voice. Budget: ~30 minutes. Record findings as the JSON from *copy changed settings*.
 
+The default heuristic is also regression-tested against a real Russian Voice capture supplied as **Sol**: compared
+with its energetic answer, its calm answer was quieter and darker but *more* melodically variable. Therefore
+`DEFAULT_PROSODY_EMOTION_CONFIG` gives the channel's relative loudness and brightness more influence than pitch
+variation once its baseline is warm. The export's browser metadata called that voice `unknown`, so this is an acoustic
+calibration, not a reliable browser-level Sol identity or a per-voice runtime profile.
+
 ## 0. Setup
 
 - Extension: `cd extension && npm run build:dev`, load `dist/`, open chatgpt.com, enable Prosopon, turn on

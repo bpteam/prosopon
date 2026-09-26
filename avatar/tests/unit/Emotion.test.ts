@@ -128,6 +128,22 @@ describe('ProsodyEmotionAnalyzer', () => {
     expect(excited.energy).toBeGreaterThan(calm.energy);
   });
 
+  it('keeps a calm but melodic Sol-style reply below a brighter, louder reply', () => {
+    const p = new ProsodyEmotionAnalyzer();
+    // RU Voice capture: the calm reply had less energy and a much darker spectrum, but more
+    // pitch variation. These feature values are intentionally close so a pitch-heavy heuristic
+    // cannot accidentally classify the calm reply as the more aroused one.
+    const high = speech({ energy: 0.844, relativePitch: 0.22, pitchVariation: 2.56, spectralCentroid: 945 });
+    const low = speech({ energy: 0.783, relativePitch: -0.88, pitchVariation: 3.43, spectralCentroid: 591 });
+    // Give the channel a stable voice baseline first, as it has during a real conversation.
+    analyse(p, repeat(speech({ energy: 0.81, pitchVariation: 3, spectralCentroid: 750 }), 5));
+    analyse(p, repeat(high, 3));
+    const energetic = p.frame().arousal;
+    analyse(p, repeat(low, 3));
+    const calm = p.frame().arousal;
+    expect(energetic - calm).toBeGreaterThan(0.08);
+  });
+
   it('heuristics alone cap valence confidence low', () => {
     const out = analyse(new ProsodyEmotionAnalyzer(), featureFrames(concat(silence(1), voice(EXCITED))));
     const f = out[out.length - 1]!;

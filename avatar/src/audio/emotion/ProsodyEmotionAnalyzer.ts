@@ -86,11 +86,14 @@ export const DEFAULT_PROSODY_EMOTION_CONFIG: Readonly<ProsodyEmotionConfig> = Ob
   syllableProminenceDb: 3,
   centroidLowHz: 700,
   centroidHighHz: 2600,
-  arousalWeights: Object.freeze({ energy: 0.45, pitchVariation: 0.25, speechRate: 0.15, brightness: 0.15, pauses: 0.1 }),
+  // A steady synthetic Voice response can be highly melodic even when it is deliberately calm.
+  // Let its own loudness baseline carry more of arousal than pitch variation, which prevents
+  // a calm Sol-style answer from reading as excited merely because it has expressive intonation.
+  arousalWeights: Object.freeze({ energy: 0.55, pitchVariation: 0.16, speechRate: 0.13, brightness: 0.3, pauses: 0.1 }),
   baselineWeight: 0.5,
   baselineWarmup: 4,
   baselineAdaptation: 30,
-  baselineMinSpread: 0.08,
+  baselineMinSpread: 0.05,
   valenceWeights: Object.freeze({ pitchLift: 0.35, pitchVariation: 0.35, speechRate: 0.1, tension: 0.6 }),
   heuristicConfidence: 0.7,
   heuristicValenceConfidence: 0.25,

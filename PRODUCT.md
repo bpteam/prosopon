@@ -233,6 +233,11 @@ the state profile (speaking: assistant 1 / user 0; listening: assistant 0.15 / u
 channel drives self-expression (face, brows, head/gaze motion, posture, gesture energy); the user channel drives
 attentive reaction.
 
+The default heuristic is regression-tested with an acoustic profile from a supplied Russian Sol session: a calm
+answer may be more melodically variable than an energetic one, so arousal prioritises relative channel loudness and
+brightness over pitch variation after baseline learning. Browser voice metadata is not a dependable identity source;
+there is no per-voice runtime profile.
+
 `mode` values: `heuristic` (no model), `ml-wasm` (model fused in), `fallback` (model failed; rules only).
 
 ### 5.9 Local emotion model (optional)
