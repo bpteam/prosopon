@@ -121,7 +121,8 @@ Rules marked *(tested)* are enforced by `avatar/tests/unit/architecture.test.ts`
     the user placed it (placement never depends on ChatGPT's DOM) and only the orb is not hidden.
 14. **No raw audio across extension contexts** *(tested)*. Frames (`LipSyncFrame`, `UserVoiceFrame`, `EmotionFrame`, status)
     travel over the typed protocol (`PROTOCOL_VERSION` in `extension/src/shared/messages.ts`). PCM chunks for the
-    local model stay inside the offscreen document.
+    local model stay inside the offscreen runtime and its dedicated same-origin inference Worker; they never cross
+    an extension context.
 15. **Executable code is local.** No remote JS/WASM. The only network fetch is the pinned emotion model download.
 16. **Delta-time everywhere.** Animation integrates `delta`; discrete events split delta at their boundary, so
     30/60/120 FPS give the same result.
@@ -228,7 +229,7 @@ the state profile (speaking: assistant 1 / user 0; listening: assistant 0.15 / u
 channel drives self-expression (face, brows, head/gaze motion, posture, gesture energy); the user channel drives
 attentive reaction.
 
-`mode` values: `heuristic` (no model), `ml-webgpu` / `ml-wasm` (model fused in), `fallback` (model failed; rules only).
+`mode` values: `heuristic` (no model), `ml-wasm` (model fused in), `fallback` (model failed; rules only).
 
 ### 5.9 Local emotion model (optional)
 
@@ -237,12 +238,16 @@ attentive reaction.
   [`extension/src/emotion/EmotionModelManifest.ts`](extension/src/emotion/EmotionModelManifest.ts)**; the values are
   listed once in [extension/README.md](extension/README.md#emotion-model).
 - Installed from the extension popup in one click: download → size check → SHA-256 → IndexedDB → ONNX Runtime
-  initialisation in the offscreen document → self-test → ready. Bytes live in IndexedDB
+  initialisation in a dedicated Worker owned by the offscreen runtime → self-test → ready. Bytes live in IndexedDB
   (`prosopon-emotion-models`), metadata (id, revision, sha256, installedAt, enabled) in `chrome.storage.local`.
-  Model bytes never go to `chrome.storage`.
+  Model bytes never go to `chrome.storage`. If the bytes are later missing while metadata remains, stale metadata is
+  removed and *Retry* downloads a fresh verified copy. The offscreen self-test retries its first read briefly after
+  installation to accommodate IndexedDB commit visibility between extension contexts and verifies a fresh Blob
+  directly rather than waiting for its asynchronously published installation state.
 - **Disable** keeps the verified bytes (re-enable without download); **Remove** deletes bytes and metadata.
-- Inference: WebGPU → WASM (single-threaded, packaged `ort-wasm-simd-threaded.jsep.wasm`) → heuristic. A load
-  timeout (30 s) or 3 failed inferences in a row turn every channel to `fallback`.
+- Inference: single-threaded WASM (packaged `ort-wasm-simd-threaded.jsep.wasm`) → heuristic. WebGPU is deliberately
+  not used in the offscreen audio process: a GPU driver reset would interrupt tab audio and lip sync. A load timeout
+  (30 s) or 3 failed inferences in a row turn every channel to `fallback`.
 - Embedded build (`npm run build:extension:embedded`) packages the artifact inside the extension instead of
   downloading it.
 - After installation inference is local and works offline.
@@ -297,7 +302,7 @@ MV3, Chrome 116+, active only on `https://chatgpt.com/*`.
 | Context | Owns | Never |
 |---|---|---|
 | service worker | per-tab enable state (`TabSessions`), `tabCapture` stream ids, offscreen lifecycle, mic opt-in, emotion model installer, message routing | DOM, audio analysis, Three.js |
-| offscreen document | tab + mic `MediaStream`s, AudioContexts, worklets, lip sync, VAD, pitch, prosody, model inference | Three.js, VRM, Avatar, ChatGPT DOM |
+| offscreen document | tab + mic `MediaStream`s, AudioContexts, worklets, lip sync, VAD, pitch, prosody; owns the dedicated same-origin Worker for model inference | Three.js, VRM, Avatar, ChatGPT DOM |
 | content script | `ChatGPTAdapter`, `AvatarOverlay` (full-viewport, click-through shadow root), `UiLayer` (in-page UI shadow root), `AvatarController`, `ConversationSignalResolver`, `FrameMouthSource`, `SemanticFeed` (reply text → gesture intents), Developer Mode (lazy chunk) | audio nodes, PCM, streams |
 | popup | avatar on/off, microphone reactions, avatar layout (preset, size, *Move avatar*), emotion model install/enable/disable/remove, Developer mode switch | analysis, rendering, Three.js |
 | permission page | one-time microphone grant for the extension origin | analysis |
@@ -338,7 +343,8 @@ on begins a new diagnostics session and restores the default Debug HUD, so the D
 lost.
 
 Permissions: `tabCapture`, `offscreen`, `scripting` (re-inject into open tabs after install/update), `contextMenus`
-(mic opt-in), `storage` (mic opt-in in `session`; model metadata, layout and Developer Mode in `local`); hosts `https://chatgpt.com/*`,
+(mic opt-in), `storage` (mic opt-in in `session`; model metadata, layout and Developer Mode in `local`),
+`unlimitedStorage` (protects the 50.6 MB local emotion-model Blob in IndexedDB from quota eviction); hosts `https://chatgpt.com/*`,
 `https://huggingface.co/*` (model download). CSP `script-src 'self' 'wasm-unsafe-eval'` for ONNX Runtime WASM.
 
 ### 5.13 Privacy
@@ -399,7 +405,8 @@ Debug APIs are development-only and must not become runtime dependencies.
 - **VRM variation.** `overrideMouth`/`overrideBlink`, expression strengths, bone proportions and spring-bone setups
   differ per model; per-model calibration is expected.
 - **Device changes.** A disappearing microphone ends the user pipeline; it does not reopen when the device returns.
-- **Test gaps.** The emotion model installer (download, integrity, storage) has no automated tests, and the
+- **Test gaps.** The emotion model Worker and full remote installer flow need an E2E fixture; the installer state
+  and storage-recovery paths have unit coverage, and the
   extension's local-model E2E tests do not exercise the installed-model path (see
   [extension/README.md](extension/README.md#tests)). The real toolbar/popup user-gesture path and the live
   chatgpt.com DOM are not covered by E2E.

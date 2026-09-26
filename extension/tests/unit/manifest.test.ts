@@ -54,6 +54,6 @@ describe('local emotion model (US-007)', () => {
   });
 
   it('uses only the required scoped model host permission', () => {
-    expect(manifest.permissions).toEqual(['tabCapture', 'offscreen', 'scripting', 'contextMenus', 'storage']);
+    expect(manifest.permissions).toEqual(['tabCapture', 'offscreen', 'scripting', 'contextMenus', 'storage', 'unlimitedStorage']);
   });
 });

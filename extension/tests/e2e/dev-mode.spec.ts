@@ -150,14 +150,23 @@ test('Developer mode flow: HUD, windows, presets, size, placement, persistence, 
   await ui(chatgpt).locator('[data-testid="toolbar-reset"]').click();
   await expect(host).toHaveAttribute('data-camera-modified', 'false');
 
-  // 14. Developer mode off from Dev Tools → Settings: every panel, the toolbar and the UI host are gone.
+  // 14. Closing the HUD does not strand the next Developer Mode session without its entry point.
+  await hud.locator('[data-action="close"]').focus();
+  await chatgpt.keyboard.press('Escape');
+  await expect(hud).toHaveCount(0);
+
+  // 15. Developer mode off from Dev Tools → Settings: every panel, the toolbar and the UI host are gone.
   await ui(chatgpt).locator('[data-testid="dev-window-devtools"] [role="tab"][data-tab="Settings"]').click();
   await ui(chatgpt).locator('[data-testid="dev-mode-off"]').click();
   await expect(chatgpt.locator('#prosopon-ui')).toHaveCount(0);
   await expect(host).toHaveAttribute('data-dev-mode', 'false');
   expect(await stored(serviceWorker, 'prosopon.developerMode')).toBe(false);
 
-  // 15. The avatar keeps running with the saved layout.
+  // 16. A fresh session restores the default HUD even though it was closed in the prior one.
+  await serviceWorker.evaluate(() => chrome.storage.local.set({ 'prosopon.developerMode': true }));
+  await expect(ui(chatgpt).locator('[data-testid="dev-window-hud"]')).toHaveCount(1);
+
+  // 17. The avatar keeps running with the saved layout.
   expect(await overlayCounts(chatgpt)).toEqual({ roots: 1, canvases: 1 });
   await expect(host).toHaveAttribute('data-camera-preset', 'full-body');
   await chatgpt.evaluate(() => (window as any).fixture.playSpeech());

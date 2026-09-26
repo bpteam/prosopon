@@ -9,7 +9,8 @@
     "offscreen",
     "scripting",
     "contextMenus",
-    "storage"
+    "storage",
+    "unlimitedStorage"
   ],
   "host_permissions": [
     "https://chatgpt.com/*",

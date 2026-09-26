@@ -6,6 +6,18 @@ export interface ModelStorage {
   remove(id: string): Promise<void>;
 }
 
+/**
+ * IndexedDB can deserialize a Blob created by another extension context. Its
+ * constructor is then not necessarily this context's global Blob, so `instanceof
+ * Blob` is not a safe check here.
+ */
+export function isStoredModelBlob(value: unknown): value is Blob {
+  if (!value || typeof value !== 'object') return false;
+  const blob = value as Partial<Blob>;
+  return typeof blob.arrayBuffer === 'function' && typeof blob.slice === 'function' &&
+    typeof blob.size === 'number' && Number.isFinite(blob.size) && typeof blob.type === 'string';
+}
+
 const DB = 'prosopon-emotion-models';
 const STORE = 'models';
 
@@ -14,12 +26,12 @@ export class IndexedDbModelStorage implements ModelStorage {
   private db: Promise<IDBDatabase> | null = null;
 
   has(id: string): Promise<boolean> {
-    return this.get(id).then((v) => v !== undefined);
+    return this.get(id).then(isStoredModelBlob);
   }
 
   async read(id: string): Promise<ArrayBuffer> {
     const value = await this.get(id);
-    if (!(value instanceof Blob)) throw new Error('emotion model is not installed');
+    if (!isStoredModelBlob(value)) throw new Error('emotion model is not installed');
     return value.arrayBuffer();
   }
 
@@ -41,9 +53,15 @@ export class IndexedDbModelStorage implements ModelStorage {
     return new Promise((resolve, reject) => {
       const tx = db.transaction(STORE, mode);
       const request = operation(tx.objectStore(STORE));
-      request.onsuccess = () => resolve(request.result);
+      let result: unknown;
+      // A request succeeding means it was queued, not that its transaction is
+      // durable and visible to the offscreen document. The installer writes
+      // metadata immediately afterwards, so wait for oncomplete instead.
+      request.onsuccess = () => { result = request.result; };
       request.onerror = () => reject(request.error ?? new Error('model storage request failed'));
+      tx.oncomplete = () => resolve(result);
       tx.onabort = () => reject(tx.error ?? new Error('model storage transaction aborted'));
+      tx.onerror = () => reject(tx.error ?? new Error('model storage transaction failed'));
     });
   }
 

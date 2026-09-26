@@ -6,7 +6,6 @@ import { VisemeLipSync } from '@avatar/audio/VisemeLipSync';
 import { headAudioFactory } from '@avatar/audio/analyzers/HeadAudioAnalyzer';
 import { wLipSyncFactory } from '@avatar/audio/analyzers/WLipSyncAnalyzer';
 import { EmotionModelHost } from '@avatar/audio/emotion/EmotionModelHost';
-import { onnxEmotionLoader } from '@avatar/audio/emotion/OnnxEmotionModel';
 import {
   LIPSYNC_PORT,
   describeError,
@@ -23,6 +22,7 @@ import {
 } from '../shared/messages';
 import { PCM_CHUNK_SECONDS, ProsodyChannel, attachFeatureWorklet } from './ProsodyChannel';
 import { UserVoicePipeline } from './UserVoicePipeline';
+import { workerEmotionLoader } from './WorkerEmotionModel';
 
 declare const __PROSOPON_ML__: boolean;
 
@@ -308,21 +308,24 @@ function setEmotionStatus(status: EmotionStatus): void {
 /**
  * Reads an opted-in installed model only when the offscreen audio runtime exists.
  */
-function loadEmotionModel(): Promise<void> {
+async function loadEmotionModel(allowPendingInstall = false): Promise<void> {
   if (emotionHost) return Promise.resolve();
-  if (emotionLoad) return emotionLoad;
-  emotionLoad = loadEmotionModelOnce().finally(() => { emotionLoad = null; });
+  if (emotionLoad) {
+    await emotionLoad;
+    if (emotionHost || !allowPendingInstall) return;
+  }
+  emotionLoad = loadEmotionModelOnce(allowPendingInstall).finally(() => { emotionLoad = null; });
   return emotionLoad;
 }
 
-async function loadEmotionModelOnce(): Promise<void> {
+async function loadEmotionModelOnce(allowPendingInstall: boolean): Promise<void> {
   if (!__PROSOPON_ML__) return;
   try {
     const { installedEmotionModel } = await import('../emotion/InstalledModel');
-    const installed = await installedEmotionModel();
+    const installed = await installedEmotionModel(allowPendingInstall);
     if (!installed) return;
     const spec = { ...installed.spec, data: installed.data, outputNames: { arousal: 'arousal', valence: 'valence' } };
-    const host = new EmotionModelHost(spec, onnxEmotionLoader({ wasmUrl: url(AUDIO_RUNTIME_CONFIG.ortWasmPath) }));
+    const host = new EmotionModelHost(spec, workerEmotionLoader(url(AUDIO_RUNTIME_CONFIG.ortWasmPath)));
     emotionHost = host;
     userEmotion.attachHost(host);
     for (const session of sessions.values()) {
@@ -353,7 +356,9 @@ function refreshEmotionStatus(): EmotionStatus {
 }
 void loadEmotionModel();
 async function selfTestEmotionModel(): Promise<{ ok: true } | { ok: false; error: string }> {
-  await loadEmotionModel();
+  // The service worker called this after a verified write; do not let a
+  // delayed public installation-state message hide that fresh local artifact.
+  await loadEmotionModel(true);
   try {
     if (!emotionHost) return { ok: false, error: emotionStatus.error ?? 'Installed model was not found in local storage.' };
     await emotionHost.selfTest();

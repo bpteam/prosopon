@@ -42,6 +42,10 @@ export class EmotionModelInstaller {
       this.set({ status: 'verifying', downloaded: bytes.byteLength });
       if ((await sha256(bytes)) !== EMOTION_MODEL.sha256) throw new Error('Model integrity check failed.');
       await this.storage.write(EMOTION_MODEL_KEY, bytes);
+      // Do not publish metadata until the persisted binary is readable. This
+      // prevents a stale "installed" state when IndexedDB storage was cleared
+      // or a write was interrupted between contexts.
+      if (!(await this.storage.has(EMOTION_MODEL_KEY))) throw new Error('Model could not be saved to local storage.');
       const metadata: EmotionInstallMetadata = { modelId: EMOTION_MODEL.id, revision: EMOTION_MODEL.modelRevision, sha256: EMOTION_MODEL.sha256, installedAt: Date.now(), enabled: enable };
       await chrome.storage.local.set({ [METADATA_KEY]: metadata });
       return this.set({ status: enable ? 'initializing' : 'disabled', metadata });
@@ -72,6 +76,12 @@ export class EmotionModelInstaller {
   async markRuntimeError(error: string): Promise<EmotionInstallState> {
     // Keep verified bytes and metadata so Retry can recover without another download.
     return this.set({ status: 'error', error, metadata: this.state.metadata });
+  }
+  /** The metadata exists but the binary has disappeared; clear it so Retry downloads a fresh verified copy. */
+  async markStorageMissing(error: string): Promise<EmotionInstallState> {
+    await this.storage.remove(EMOTION_MODEL_KEY).catch(() => {});
+    await chrome.storage.local.remove(METADATA_KEY).catch(() => {});
+    return this.set({ status: 'error', error });
   }
 
   private set(state: EmotionInstallState): EmotionInstallState { this.state = state; this.onState(state); return state; }

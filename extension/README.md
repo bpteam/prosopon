@@ -153,7 +153,7 @@ content script ◄──────────── runtime Port (LIPSYNC_POR
 | Context | Owns | Never |
 |---|---|---|
 | `background/` service worker | popup/menu commands, `getMediaStreamId`, offscreen lifecycle, per-tab state (`TabSessions`), mic opt-in, `EmotionModelInstaller`, routing | DOM, audio, three.js |
-| `offscreen/` | `MediaStream`s (tab + mic), one `AudioContext` per pipeline, analysers, `ProsodyChannel`s, emotion model host, frame generation | three.js, VRM, Avatar, ChatGPT DOM; mixing the two signals |
+| `offscreen/` | `MediaStream`s (tab + mic), one `AudioContext` per pipeline, analysers, `ProsodyChannel`s, frame generation; owns a same-origin Worker for emotion-model inference | three.js, VRM, Avatar, ChatGPT DOM; mixing the two signals |
 | `content/` | overlay, renderer, `AvatarController`, `ConversationSignalResolver`, ChatGPT DOM (in `ChatGPTAdapter` only), `DevBridge` implementation | audio nodes, PCM, streams |
 | `ui/` | in-page UI: `UiLayer`, placement handle, Developer mode windows (through `DevBridge` only) | three.js, bones, expressions, ChatGPT DOM |
 | `popup/` | avatar toggle, mic reactions, layout settings, Developer mode switch, emotion model controls | analysis, rendering |
@@ -230,9 +230,16 @@ the manifest is treated as not installed.
    and the state is `error`;
 3. stores the bytes as a Blob in IndexedDB (database `prosopon-emotion-models`, store `models`, key
    `<id>@<revision>`); metadata (`modelId`, `revision`, `sha256`, `installedAt`, `enabled`) goes to
-   `chrome.storage.local` (`emotionModelMetadata`). Model bytes never go into `chrome.storage`;
-4. asks the offscreen document to load the model and run a self-test; success → `ready`, failure → `error` with the
+   `chrome.storage.local` (`emotionModelMetadata`). Model bytes never go into `chrome.storage`; the
+   `unlimitedStorage` permission protects this 50.6 MB local artifact from web-storage quota eviction;
+4. asks the offscreen runtime to load the model in its dedicated Worker and run a self-test; success → `ready`, failure → `error` with the
    verified bytes kept, so *Retry installation* recovers without another download.
+
+If IndexedDB no longer has the binary although metadata says it is installed, the extension removes the stale
+metadata and leaves a recoverable error; *Retry* downloads a new verified local copy. The offscreen self-test
+briefly retries its first IndexedDB read after a fresh installation, so it does not mistake a cross-context commit
+visibility delay for a missing model. That self-test verifies the newly written local artifact directly instead of
+waiting for its asynchronously published `installed` status.
 
 The offscreen document reads the bytes from IndexedDB only after the service worker confirms the model is installed
 and enabled (`InstalledModel.ts`). Once installed, inference is local and works offline.
@@ -240,12 +247,14 @@ and enabled (`InstalledModel.ts`). Once installed, inference is local and works 
 **Disable vs Remove.** *Disable emotions* unloads the model and keeps the verified bytes (*Enable emotions* brings it
 back without a download). *Remove emotion model* unloads it and deletes bytes and metadata.
 
-**Runtime fallback.** `OnnxEmotionModel` tries WebGPU (when `navigator.gpu` yields an adapter), then WASM
-(single-threaded: extension pages are not cross-origin isolated). A load that fails or exceeds 30 s, or 3 failed
+**Runtime fallback.** The extension uses ONNX Runtime WebAssembly (single-threaded: extension pages are not
+cross-origin isolated). It deliberately avoids WebGPU in the offscreen audio process: a GPU driver reset there
+would interrupt tab audio and lip sync. A load that fails or exceeds 30 s, or 3 failed
 inferences in a row, switch every channel to `fallback` (prosody rules); the avatar keeps working. Frame `mode`:
-`heuristic`, `ml-webgpu`, `ml-wasm` or `fallback`. The CSP allows `'wasm-unsafe-eval'` on extension pages for this
+`heuristic`, `ml-wasm` or `fallback`. The CSP allows `'wasm-unsafe-eval'` on extension pages for this
 (without it: "Refused to compile or instantiate WebAssembly module"). PCM chunks at 16 kHz are posted from the
-worklets to the offscreen document only while a model is loaded; they never leave it.
+worklets to the offscreen runtime's same-origin inference Worker only while a model is loaded; they never leave the
+extension audio runtime. The Worker keeps ONNX loading and inference off the timer that sends lip-sync frames.
 
 ### Embedded build
 
@@ -270,6 +279,7 @@ IndexedDB. The `PROSOPON_EMBED_MODEL=1 …` script syntax needs a POSIX shell (u
 | `scripting` | re-injecting `content.js` into open chatgpt.com tabs after install/update |
 | `contextMenus` | the *Microphone reactions* checkbox on the toolbar icon |
 | `storage` | mic opt-in (`storage.session`); emotion model metadata, layout, Developer mode, window layout (`storage.local`) |
+| `unlimitedStorage` | prevents quota eviction of the 50.6 MB local emotion-model Blob in IndexedDB |
 | host `https://chatgpt.com/*` | content script, tab URLs, web-accessible avatar runtime |
 | host `https://huggingface.co/*` | the pinned model download |
 
@@ -355,9 +365,8 @@ Playwright's default `--mute-audio` is removed so the captured audio isn't silen
 - `semantic.spec.ts`: a reply streamed into the fixture (`fixture.streamReply`) → cues and intents on the overlay
   host; the reply present at activation is ignored; `prosopon:semantic` off stops analysis.
 - `emotion.spec.ts`: assistant and user channels through to the mixer, interruption priority swap, the Dev Tools
-  emotion switch;
-  local-model tests on WASM, WebGPU (SwiftShader: `--enable-unsafe-webgpu --use-webgpu-adapter=swiftshader`) and a
-  model that fails to load, using the `avatar/tests/fixtures/loudness-probe.onnx` plumbing fixture.
+  emotion switch; local-model WASM and failure paths use the `avatar/tests/fixtures/loudness-probe.onnx` plumbing
+  fixture. The extension does not enable WebGPU in its offscreen audio process.
 
 **Currently failing:** the three local-model tests in `emotion.spec.ts` package `emotion-model/model.json` into
 `dist/`, a path the runtime no longer reads (the model now comes only from IndexedDB via the installer). They fail

@@ -35,7 +35,13 @@ async function initializeEmotionModel(): Promise<EmotionInstallState> {
   try {
     await ensureOffscreen();
     const selfTest = await toOffscreen({ type: 'emotion:model-self-test' }) as { ok?: boolean; error?: string };
-    return selfTest.ok ? emotionInstaller.markReady() : await emotionInstaller.markRuntimeError(selfTest.error ?? 'Model self-test failed.');
+    if (selfTest.ok) return emotionInstaller.markReady();
+    const error = selfTest.error ?? 'Model self-test failed.';
+    // The offscreen document cannot load a Blob that is no longer in IndexedDB.
+    // Drop stale metadata too: otherwise the popup's Retry just re-enables the
+    // same missing model instead of downloading a replacement.
+    if (error.includes('Installed model was not found in local storage.')) return emotionInstaller.markStorageMissing(error);
+    return emotionInstaller.markRuntimeError(error);
   } catch (error) {
     return emotionInstaller.markRuntimeError(`Model self-test failed: ${String(error)}`);
   }
