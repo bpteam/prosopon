@@ -5,6 +5,9 @@ import { VisemeAnalyzerHost, type AnalyzerChoice } from '@avatar/audio/VisemeAna
 import { VisemeLipSync } from '@avatar/audio/VisemeLipSync';
 import { headAudioFactory } from '@avatar/audio/analyzers/HeadAudioAnalyzer';
 import { wLipSyncFactory } from '@avatar/audio/analyzers/WLipSyncAnalyzer';
+import { EmotionModelHost } from '@avatar/audio/emotion/EmotionModelHost';
+import { parseModelSpec } from '@avatar/audio/emotion/EmotionModel';
+import { onnxEmotionLoader } from '@avatar/audio/emotion/OnnxEmotionModel';
 import {
   LIPSYNC_PORT,
   describeError,
@@ -12,18 +15,24 @@ import {
   parseMessage,
   type CaptureListReply,
   type CaptureReply,
+  type EmotionStatus,
   type ExtensionPayload,
   type MicInfo,
   type MicStatus,
 } from '../shared/messages';
+import { PCM_CHUNK_SECONDS, ProsodyChannel, attachFeatureWorklet } from './ProsodyChannel';
 import { UserVoicePipeline } from './UserVoicePipeline';
 
 /**
  * Offscreen audio runtime, the only extension context that touches audio. Two independent pipelines:
  *
- *   assistant: tab capture → AudioInput → existing lip-sync pipeline → LipSyncFrame, per tab
- *   user:      microphone → UserVoicePipeline (own AudioContext, worklet) → UserVoiceFrame, one for all tabs
+ *   assistant: tab capture → AudioInput ─┬─ existing lip-sync pipeline → LipSyncFrame, per tab
+ *                                        └─ voice-feature worklet → ProsodyChannel → EmotionFrame ('assistant')
+ *   user:      microphone → UserVoicePipeline (own AudioContext, worklet) → UserVoiceFrame ─┐, one for all tabs
+ *                                                                        ProsodyChannel ◄──┘ → EmotionFrame ('user')
  *
+ * Both channels run the same feature extractor and the same ProsodyEmotionAnalyzer class, each with its own
+ * instance. An optional local model (emotion-model/model.json, not shipped) serves both through one host.
  * They never share a node or a context; each only produces frames, streamed to the content scripts over their
  * Ports. Knows nothing about the avatar, three.js or ChatGPT's DOM.
  */
@@ -39,8 +48,12 @@ export const AUDIO_RUNTIME_CONFIG = {
    * 0 by default: any value adds the same delay to ChatGPT's answers.
    */
   monitorDelay: 0,
-  /** UserVoiceFrames per second (counted in audio time by the worklet). */
+  /** UserVoiceFrames per second (counted in audio time by the worklet); also the assistant's feature rate. */
   userFrameRate: 25,
+  /** Description of an optional local emotion model; missing file = prosody rules only. */
+  emotionModelPath: 'emotion-model/model.json',
+  /** ONNX Runtime's WebAssembly binary (serves the WebGPU and the WASM backend). */
+  ortWasmPath: 'ort/ort-wasm-simd-threaded.jsep.wasm',
 };
 
 const url = (path: string) => chrome.runtime.getURL(path);
@@ -59,6 +72,9 @@ const factories = {
 
 class CaptureSession {
   private readonly input = new AudioInput();
+  /** The assistant's voice channel of this tab. */
+  readonly emotion: ProsodyChannel;
+  private detachFeatures: (() => void) | null = null;
   private readonly lipSync = new VisemeLipSync(new AmplitudeLipSync(() => this.input.readRms()));
   private readonly host = new VisemeAnalyzerHost(this.input, this.lipSync, factories, AUDIO_RUNTIME_CONFIG.analyzer);
   private readonly ports = new Set<chrome.runtime.Port>();
@@ -71,7 +87,14 @@ class CaptureSession {
     readonly tabId: number,
     private readonly stream: MediaStream,
     private readonly onEnded: (session: CaptureSession, reason: string) => void,
-  ) {}
+  ) {
+    this.emotion = new ProsodyChannel(
+      `assistant:${tabId}`,
+      AUDIO_RUNTIME_CONFIG.userFrameRate,
+      (frame) => this.broadcast({ type: 'emotion:frame', channel: 'assistant', frame }),
+      emotionHost,
+    );
+  }
 
   static async start(
     tabId: number,
@@ -95,7 +118,28 @@ class CaptureSession {
       if (kind === 'none' && !session.disposed) onEnded(session, 'tab audio capture ended');
     });
     session.startTicking();
+    await session.startEmotion();
     return session;
+  }
+
+  /** Prosody of the assistant's voice. Optional: if it fails, lip sync and the avatar carry on without it. */
+  private async startEmotion(): Promise<void> {
+    const ctx = this.input.context;
+    if (!ctx) return;
+    try {
+      const detach = await attachFeatureWorklet(
+        ctx,
+        url('worklets/user-voice.js'),
+        (node) => this.input.addTap(node),
+        { frameRate: AUDIO_RUNTIME_CONFIG.userFrameRate, pcm: emotionHost !== null },
+        (frame) => this.emotion.pushFeatures(frame),
+        (samples, rate) => this.emotion.pushPcm(samples, rate),
+      );
+      if (this.disposed) detach();
+      else this.detachFeatures = detach;
+    } catch (error) {
+      console.warn('[prosopon] assistant prosody unavailable; lip sync continues:', error);
+    }
   }
 
   addPort(port: chrome.runtime.Port): void {
@@ -106,10 +150,15 @@ class CaptureSession {
       port.onMessage.addListener((raw) => {
         const msg = parseMessage(raw);
         if (msg?.type === 'debug:analyzer') this.host.select(msg.choice);
+        if (msg?.type === 'debug:emotion-config') {
+          this.emotion.applyConfig(msg.config);
+          userEmotion.applyConfig(msg.config);
+        }
       });
     }
     this.sinceStatus = Infinity; // new listener: send the status right away
     this.send(port, { type: 'user:status', status: userVoice.status });
+    this.send(port, { type: 'emotion:status', status: emotionStatus });
   }
 
   dispose(): void {
@@ -117,6 +166,9 @@ class CaptureSession {
     this.disposed = true;
     if (this.timer !== null) clearInterval(this.timer);
     this.timer = null;
+    this.detachFeatures?.();
+    this.detachFeatures = null;
+    this.emotion.dispose();
     this.host.dispose();
     void this.input.dispose();
     for (const track of this.stream.getTracks()) track.stop();
@@ -142,6 +194,7 @@ class CaptureSession {
       if (this.sinceStatus >= AUDIO_RUNTIME_CONFIG.statusInterval) {
         this.sinceStatus = 0;
         this.broadcast({ type: 'audio:status', status: { mode: this.lipSync.mode, analyzer: this.host.status } });
+        this.broadcast({ type: 'emotion:status', status: refreshEmotionStatus() });
       }
     } catch (error) {
       this.onEnded(this, `audio runtime failed: ${describeError(error)}`);
@@ -164,6 +217,15 @@ class CaptureSession {
 
 const sessions = new Map<number, CaptureSession>();
 
+/** Optional local emotion model, shared by every channel; null = prosody rules only. */
+let emotionHost: EmotionModelHost | null = null;
+let emotionStatus: EmotionStatus = { model: 'off', mode: 'heuristic', inferences: 0 };
+
+/** The user's voice channel: one for all tabs, like the microphone. */
+const userEmotion = new ProsodyChannel('user', AUDIO_RUNTIME_CONFIG.userFrameRate, (frame) =>
+  broadcastAll({ type: 'emotion:frame', channel: 'user', frame }),
+);
+
 /** One microphone for the whole browser: its frames go to every enabled tab. */
 const userVoice = new UserVoicePipeline(
   {
@@ -171,10 +233,60 @@ const userVoice = new UserVoicePipeline(
     createContext: () => new AudioContext(),
     workletUrl: url('worklets/user-voice.js'),
     frameRate: AUDIO_RUNTIME_CONFIG.userFrameRate,
+    pcmChunkSeconds: () => (emotionHost ? PCM_CHUNK_SECONDS : undefined),
+    onPcm: (samples, rate) => userEmotion.pushPcm(samples, rate),
   },
-  (frame) => broadcastAll({ type: 'user:frame', frame }),
-  (status) => broadcastAll({ type: 'user:status', status }),
+  (frame) => {
+    broadcastAll({ type: 'user:frame', frame });
+    userEmotion.pushFeatures(frame);
+  },
+  (status) => {
+    if (status.state !== 'on') userEmotion.reset();
+    broadcastAll({ type: 'user:status', status });
+  },
 );
+
+function setEmotionStatus(status: EmotionStatus): void {
+  emotionStatus = status;
+  broadcastAll({ type: 'emotion:status', status });
+}
+
+/**
+ * Looks for a packaged model description once. No file (the default build): prosody rules, mode 'heuristic'. A
+ * model that fails to load or run: mode 'fallback'. Either way the avatar keeps working.
+ */
+async function loadEmotionModel(): Promise<void> {
+  let raw: unknown;
+  try {
+    const response = await fetch(url(AUDIO_RUNTIME_CONFIG.emotionModelPath));
+    if (!response.ok) return;
+    raw = await response.json();
+  } catch {
+    return; // no model packaged
+  }
+  const spec = parseModelSpec(raw, (file) => url(`emotion-model/${file}`));
+  if (!spec) {
+    setEmotionStatus({ model: 'failed', mode: 'fallback', inferences: 0, error: 'invalid emotion-model/model.json' });
+    return;
+  }
+  const host = new EmotionModelHost(spec, onnxEmotionLoader({ wasmUrl: url(AUDIO_RUNTIME_CONFIG.ortWasmPath) }));
+  emotionHost = host;
+  userEmotion.attachHost(host);
+  for (const session of sessions.values()) session.emotion.attachHost(host);
+  setEmotionStatus({ model: 'loading', mode: 'heuristic', inferences: 0 });
+  await host.load();
+  refreshEmotionStatus();
+}
+
+/** Current model status (inference count and failures change without events). */
+function refreshEmotionStatus(): EmotionStatus {
+  const host = emotionHost;
+  if (!host) return emotionStatus;
+  const model = host.status === 'ready' ? 'ready' : host.status === 'failed' ? 'failed' : 'loading';
+  emotionStatus = { model, mode: host.mode, inferences: host.inferenceCount, error: host.error ?? undefined };
+  return emotionStatus;
+}
+void loadEmotionModel();
 /** Set by the service worker from the user's opt-in; off until then. */
 let micWanted = false;
 

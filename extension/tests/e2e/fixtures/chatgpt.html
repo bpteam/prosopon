@@ -95,6 +95,36 @@
           speech?.ctx.close();
           speech = null;
         },
+        /**
+         * Two voices that differ the way a calm and an energetic reply do: level, syllable rate, intonation swing and
+         * brightness. Same mechanism as playSpeech (a voiced buzz through a low-pass), so lip sync reads both.
+         */
+        playVoice(style) {
+          if (speech) return;
+          const s = style === 'energetic'
+            ? { f0: 190, swing: 5, gain: 0.6, rate: 6.5, cutoff: 3200 }
+            : { f0: 130, swing: 0.4, gain: 0.12, rate: 3, cutoff: 700 };
+          const ctx = new AudioContext();
+          const osc = ctx.createOscillator();
+          osc.type = 'sawtooth';
+          const lowpass = ctx.createBiquadFilter();
+          lowpass.type = 'lowpass';
+          lowpass.frequency.value = s.cutoff;
+          const env = ctx.createGain();
+          env.gain.value = 0;
+          osc.connect(lowpass).connect(env).connect(ctx.destination);
+          const t0 = ctx.currentTime + 0.05;
+          const syl = 1 / s.rate;
+          for (let i = 0; i < 400; i++) {
+            const t = t0 + i * syl;
+            env.gain.setValueAtTime(s.gain * 0.2, t);
+            env.gain.linearRampToValueAtTime(s.gain, t + syl * 0.35);
+            env.gain.linearRampToValueAtTime(s.gain * 0.2, t + syl * 0.9);
+            osc.frequency.setValueAtTime(s.f0 * 2 ** ((s.swing * Math.sin(i * 0.9)) / 12), t);
+          }
+          osc.start();
+          speech = { ctx };
+        },
       };
     </script>
   </body>

@@ -118,6 +118,10 @@ export class ContentLifecycle {
       runtime.pushUserVoice(msg.frame);
     } else if (msg.type === 'user:status') {
       runtime.setMicStatus(msg.status);
+    } else if (msg.type === 'emotion:frame') {
+      runtime.pushEmotion(msg.channel, msg.frame);
+    } else if (msg.type === 'emotion:status') {
+      runtime.setEmotionStatus(msg.status);
     }
   }
 

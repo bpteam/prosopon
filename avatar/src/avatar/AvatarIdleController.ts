@@ -1,4 +1,5 @@
 import type { ProceduralPose } from './Avatar';
+import { NO_EMOTION_EXPRESSIONS } from './EmotionExpression';
 
 export interface IdleConfig {
   enabled: boolean;
@@ -132,6 +133,8 @@ export class AvatarIdleController {
       ou: 0,
       ee: 0,
       oh: 0,
+      // Idle has no opinion about emotion: the mixer takes these from the emotion layer.
+      ...NO_EMOTION_EXPRESSIONS,
       gazePhase: 'center',
     };
   }

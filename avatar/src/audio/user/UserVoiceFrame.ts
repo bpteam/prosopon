@@ -27,7 +27,19 @@ export interface UserVoiceFrame {
   relativePitch: number;
   /** Standard deviation of recent voiced pitch, semitones (≈ intonation liveliness). */
   pitchVariation: number;
+  /** Power-weighted mean frequency of the last window (0–8 kHz band), Hz. 0 below the speech gate. */
+  spectralCentroid: number;
+  /** Frequency below which 85% of the window's power lies, Hz. 0 below the speech gate. */
+  spectralRolloff: number;
+  /** Sign changes per sample of the last hop, [0, 1]. 0 below the speech gate. */
+  zeroCrossingRate: number;
 }
+
+/**
+ * The same frame describes any voice channel: the extractor that produces it runs on the user's microphone and on the
+ * assistant's tab audio alike. `UserVoiceFrame` is the historical name.
+ */
+export type VoiceFeatureFrame = UserVoiceFrame;
 
 export const SILENT_USER_VOICE_FRAME: Readonly<UserVoiceFrame> = Object.freeze({
   speaking: false,
@@ -39,6 +51,9 @@ export const SILENT_USER_VOICE_FRAME: Readonly<UserVoiceFrame> = Object.freeze({
   pitchConfidence: 0,
   relativePitch: 0,
   pitchVariation: 0,
+  spectralCentroid: 0,
+  spectralRolloff: 0,
+  zeroCrossingRate: 0,
 });
 
 const NUMBER_FIELDS = [
@@ -49,6 +64,9 @@ const NUMBER_FIELDS = [
   'pitchConfidence',
   'relativePitch',
   'pitchVariation',
+  'spectralCentroid',
+  'spectralRolloff',
+  'zeroCrossingRate',
 ] as const satisfies readonly (keyof UserVoiceFrame)[];
 
 /** Structural check for frames received from another context: primitives only, bounded ranges. */
@@ -60,6 +78,8 @@ export function isUserVoiceFrame(value: unknown): value is UserVoiceFrame {
   if (f.pitchHz !== null && (typeof f.pitchHz !== 'number' || !(f.pitchHz > 0))) return false;
   if ((f.energy as number) < 0 || (f.energy as number) > 1) return false;
   if ((f.pitchConfidence as number) < 0 || (f.pitchConfidence as number) > 1) return false;
+  if ((f.zeroCrossingRate as number) < 0 || (f.zeroCrossingRate as number) > 1) return false;
+  if ((f.spectralCentroid as number) < 0 || (f.spectralRolloff as number) < 0) return false;
   // Nothing else rides along: a frame never carries buffers or nested objects.
   return Object.keys(f).every((k) => k === 'speaking' || k === 'pitchHz' || (NUMBER_FIELDS as readonly string[]).includes(k));
 }

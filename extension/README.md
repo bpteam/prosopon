@@ -1,4 +1,4 @@
-# Prosopon Chrome extension (US-004, US-005)
+# Prosopon Chrome extension (US-004, US-005, US-006)
 
 Replaces the ChatGPT voice orb with the VRM avatar and drives its mouth from the audio the ChatGPT tab plays.
 Optionally (US-005) it also listens to the user's microphone to tell when they speak and how their voice sounds,
@@ -107,6 +107,29 @@ Enforced by `tests/unit/architecture.test.ts` on the import graph.
   for `BehaviorMixer`, which clamps it to `REACTION_LIMITS` (±12 % head motion, 0.7° lean, 0.7° chin lift, a 3° nod).
   A nod follows an utterance of ≥ 500 ms, at most every 2 s. Reactions are muted while the assistant speaks (the mic
   may be hearing it). The mouth never follows the user.
+- **Prosody & emotion (US-006)** — both voice channels go through the same code: the voice-feature worklet (VAD, pitch,
+  spectral centroid/roll-off, ZCR) and one `ProsodyEmotionAnalyzer` instance per channel (`ProsodyChannel` in the
+  offscreen document; the assistant's is tapped off the tab capture, one per tab; the user's off the mic pipeline).
+  Each emits an `EmotionFrame` (valence, arousal, energy, tension, pitch lift/variation, confidence,
+  `valenceConfidence`, `mode`) at 8 Hz over the Port. The content script feeds them into `EmotionChannels` (one
+  follower per channel, stale → neutral) → `BehaviorMixer`, which weights them by conversation state
+  (`assistantEmotionWeight`/`userEmotionWeight` in `AvatarStateProfiles`: speaking 1/0, listening 0.15/1, so an
+  interruption hands priority to the user over the 0.35 s state blend) and by confidence. Emotion writes
+  happy/relaxed/sad/angry/surprised, head/gaze motion and posture, never a viseme. No STT, no text, no backend.
+- **Local model (optional)** — `emotion-model/model.json` + the `.onnx` next to it in the extension package
+  (`avatar/public/emotion-model/`, git-ignored). None ships: the candidates known to fit (wav2vec2/wav2small A/D/V
+  regressors) are non-commercial-licensed and English-trained. Without it the mode is `heuristic`; with it
+  `ml-webgpu` or `ml-wasm` (ONNX Runtime Web; WebGPU when an adapter exists, else single-threaded WASM); a model
+  that doesn't load, times out (30 s) or fails 3 inferences in a row turns every channel to `fallback` (prosody
+  rules). The worklet posts 16 kHz PCM chunks to the offscreen document only while a model is configured; they
+  never leave it. The manifest allows `'wasm-unsafe-eval'` on extension pages for this (without it: "Refused to
+  compile or instantiate WebAssembly module"). ONNX Runtime's binary adds 28 MB to the package.
+
+  ```json
+  { "file": "model.onnx", "sampleRate": 16000, "windowSeconds": 2, "arousalIndex": 0, "valenceIndex": 2,
+    "outputRange": [0, 1], "trust": 0.6, "inferInterval": 0.5 }
+  ```
+  Indices and range depend on the model: check its card. `trust` is how much the model overrides the rules.
 
 ## Known limitations
 
@@ -129,6 +152,14 @@ Enforced by `tests/unit/architecture.test.ts` on the import graph.
   `AUDIO_RUNTIME_CONFIG.monitorDelay` (offscreen) can delay what you hear to match, at the cost of the same delay
   in ChatGPT's answers. Off by default.
 - **Viseme quality.** HeadAudio's model is English; on Russian speech shapes are closer to amplitude (see US-003).
+- **Emotion from prosody (US-006).** Arousal/energy/tension track loudness, intonation, rate and brightness and are
+  usable; valence from audio alone is close to chance (its confidence is capped at 0.25 without a model, so the
+  smile barely moves). All thresholds are tuned on synthetic signals only: calibrate on a real mic and real ChatGPT
+  voice with `docs/US-006-calibration.md`. The user channel is also echo-prone on speakers; its weight is 0 while
+  the resolver says the assistant is speaking.
+- **VRM expression overrides.** `happy`/`sad`/`surprised` with `overrideMouth: blend` would scale visemes down by
+  their weight; `Avatar` pre-compensates visemes and blink. A model whose emotion presets `block` the mouth gets no
+  procedural emotion on them (warned once), since any weight would stop lip sync.
 
 ## Tests
 
@@ -152,3 +183,9 @@ stream id fails with "Requested device not found". The offscreen document can't 
 microphone context-wide (Chromium refuses a grant for a `chrome-extension://` origin by name); the denial test skips
 that and checks the permission page opens and everything else keeps working. The VAD/pitch/baseline algorithms are
 unit-tested in `avatar/tests/unit/UserVoice.test.ts` (synthetic signals, 10/20/40 ms and 128-sample chunks).
+
+`emotion.spec.ts` (US-006) plays a calm and an energetic synthetic voice in the page and checks the assistant channel
+through to the mixer (arousal differs, lip sync unaffected, silence decays smoothly), the user channel with the fake
+mic, the interruption priority swap and the debug switches. The model tests copy `dist/` with the loudness probe
+(`avatar/tests/fixtures/loudness-probe.onnx`, a plumbing fixture, not an emotion model) and check `ml-wasm`, `ml-webgpu`
+(SwiftShader Vulkan adapter via `--enable-unsafe-webgpu --use-webgpu-adapter=swiftshader`) and `fallback`.

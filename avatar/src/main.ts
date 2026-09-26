@@ -16,6 +16,9 @@ import { VisemeDebugPanel } from './audio/VisemeDebugPanel';
 import { VisemeLipSync } from './audio/VisemeLipSync';
 import { MAX_FRAME_DELTA, MODEL_URL, REST_POSE } from './config';
 import { DebugOverlay } from './debug/DebugOverlay';
+import { EmotionDebugPanel } from './debug/EmotionDebugPanel';
+import { EmotionChannels } from './avatar/EmotionChannels';
+import featureWorkletUrl from './audio/user/UserVoiceWorklet.ts?worker&url';
 import { AvatarStage } from './renderer/AvatarStage';
 import { RenderLoop } from './renderer/RenderLoop';
 
@@ -31,6 +34,8 @@ export interface AvatarDebugApi {
   lipSync: AmplitudeLipSync;
   visemes: VisemeLipSync;
   analyzers: VisemeAnalyzerHost;
+  emotion: EmotionChannels;
+  emotionPanel: EmotionDebugPanel | null;
   /** Live getter: current conversation state (also before the avatar is loaded). */
   readonly state: AvatarState;
 }
@@ -65,12 +70,16 @@ overlay.visible = import.meta.env.DEV;
 // Exists before the model: conversation state set while the VRM loads is kept and applied on attach.
 const controller = new AvatarController({ idle });
 controller.setMouthSource(visemes);
+// Emotion: fed by the Emotion / Prosody panel (file or mic → feature worklet → ProsodyEmotionAnalyzer).
+const emotion = new EmotionChannels();
+controller.setEmotionSource(emotion);
 document.body.dataset.avatarState = controller.getState();
 controller.onStateChange((state) => (document.body.dataset.avatarState = state));
 
 let panel: AvatarDebugPanel | null = null;
 let lipSyncPanel: LipSyncDebugPanel | null = null;
 let visemePanel: VisemeDebugPanel | null = null;
+let emotionPanel: EmotionDebugPanel | null = null;
 let errorBanner: HTMLElement | null = null;
 
 const debugApi: AvatarDebugApi = {
@@ -85,6 +94,8 @@ const debugApi: AvatarDebugApi = {
   lipSync,
   visemes,
   analyzers,
+  emotion,
+  emotionPanel: null,
   get state() {
     return controller.getState();
   },
@@ -94,6 +105,7 @@ if (import.meta.env.DEV) window.__AVATAR_DEBUG__ = debugApi;
 // Single rAF loop: controller (state → idle → lip sync → composition → avatar/VRM) → render.
 const loop = new RenderLoop((delta) => {
   controller.update(delta);
+  emotionPanel?.update();
   stage.render();
   overlay.afterRender(delta);
   debugApi.fps = overlay.meter.fps;
@@ -121,6 +133,8 @@ async function boot(): Promise<void> {
     });
     lipSyncPanel = new LipSyncDebugPanel(panel.gui, audio, lipSync);
     visemePanel = new VisemeDebugPanel(lipSyncPanel.folder, analyzers, visemes);
+    emotionPanel = new EmotionDebugPanel(panel.gui, audio, controller, emotion, featureWorkletUrl);
+    debugApi.emotionPanel = emotionPanel;
 
     overlay.setInfo({ loaded: true, vrmVersion: formatVrmVersion(avatar.vrmVersion) });
     debugApi.loaded = true;
@@ -155,6 +169,7 @@ if (import.meta.hot) {
   import.meta.hot.dispose(() => {
     loop.stop();
     controller.dispose();
+    emotionPanel?.dispose();
     visemePanel?.dispose();
     lipSyncPanel?.dispose();
     analyzers.dispose();

@@ -1,12 +1,13 @@
 import { isLipSyncFrame, type LipSyncFrame } from '@avatar/audio/LipSyncFrame';
 import { isUserVoiceFrame, type UserVoiceFrame } from '@avatar/audio/user/UserVoiceFrame';
+import { EMOTION_CHANNELS, isEmotionFrame, type EmotionChannel, type EmotionFrame } from '@avatar/audio/emotion/EmotionFrame';
 
 /**
  * Protocol between the service worker, the offscreen audio runtime and the content script.
  * Bump when a message changes shape: contexts of different versions (content scripts left over from before an
  * extension update) then ignore each other instead of misreading.
  */
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 /** Port the content script opens to the offscreen document to receive lip-sync frames for its tab. */
 export const LIPSYNC_PORT = 'prosopon:lipsync';
@@ -48,6 +49,17 @@ export interface MicInfo extends MicStatus {
   reachedDestination: boolean;
 }
 
+/** Emotion analysis in the offscreen document (diagnostics). */
+export interface EmotionStatus {
+  /** off: no model configured (prosody rules) · loading · ready · failed (prosody rules as fallback). */
+  model: 'off' | 'loading' | 'ready' | 'failed';
+  mode: AnalyzerModeName;
+  /** Model runs so far (all channels). */
+  inferences: number;
+  error?: string;
+}
+type AnalyzerModeName = EmotionFrame['mode'];
+
 export type ExtensionPayload =
   /** SW → offscreen. Reply: CaptureReply. */
   | { type: 'capture:start'; tabId: number; streamId: string }
@@ -75,6 +87,18 @@ export type ExtensionPayload =
   | { type: 'user:frame'; frame: UserVoiceFrame }
   /** Offscreen → content over LIPSYNC_PORT, on change and to every new port. */
   | { type: 'user:status'; status: MicStatus }
+  /**
+   * Offscreen → content over LIPSYNC_PORT, ~8 per second per channel while it has audio: the assistant channel of
+   * that tab, and the user channel (one microphone, sent to every enabled tab).
+   */
+  | { type: 'emotion:frame'; channel: EmotionChannel; frame: EmotionFrame }
+  /** Offscreen → content over LIPSYNC_PORT, on change and to every new port. */
+  | { type: 'emotion:status'; status: EmotionStatus }
+  /**
+   * Content → offscreen over LIPSYNC_PORT, development builds only: numeric ProsodyEmotionAnalyzer settings for
+   * calibration (applied to both channels' analysers). Ignored by production builds.
+   */
+  | { type: 'debug:emotion-config'; config: Record<string, number> }
   /** Content → SW: a failure that doesn't stop the capture (the VRM failed to load, etc.). */
   | { type: 'extension:error'; error: string }
   /**
@@ -119,7 +143,31 @@ const VALIDATORS: Record<MessageType, Validator> = {
   'user:status': (m) => isMicStatus(m.status),
   'extension:error': (m) => typeof m.error === 'string',
   'debug:analyzer': (m) => m.choice === 'headaudio' || m.choice === 'wlipsync' || m.choice === 'none',
+  'emotion:frame': (m) => EMOTION_CHANNELS.includes(m.channel as EmotionChannel) && isEmotionFrame(m.frame),
+  'emotion:status': (m) => isEmotionStatus(m.status),
+  'debug:emotion-config': (m) => {
+    const c = m.config as Record<string, unknown> | null;
+    if (!c || typeof c !== 'object' || Array.isArray(c)) return false;
+    const entries = Object.entries(c);
+    return entries.length <= 64 && entries.every(([k, v]) => /^[a-zA-Z]{1,40}$/.test(k) && typeof v === 'number' && Number.isFinite(v));
+  },
 };
+
+const MODEL_STATES: readonly EmotionStatus['model'][] = ['off', 'loading', 'ready', 'failed'];
+const MODES: readonly AnalyzerModeName[] = ['heuristic', 'ml-webgpu', 'ml-wasm', 'fallback'];
+
+export function isEmotionStatus(raw: unknown): raw is EmotionStatus {
+  if (!raw || typeof raw !== 'object') return false;
+  const s = raw as Record<string, unknown>;
+  return (
+    MODEL_STATES.includes(s.model as EmotionStatus['model']) &&
+    MODES.includes(s.mode as AnalyzerModeName) &&
+    typeof s.inferences === 'number' &&
+    Number.isInteger(s.inferences) &&
+    s.inferences >= 0 &&
+    (s.error === undefined || typeof s.error === 'string')
+  );
+}
 
 /**
  * Validates a message received from another context. Returns null for anything that isn't ours or is of another

@@ -86,7 +86,7 @@ test('mutations, SPA navigation and repeated state messages never duplicate the 
     }, i);
     // The SW re-announcing "enabled" (e.g. after a restart) must be a no-op.
     await serviceWorker.evaluate(
-      (id) => chrome.tabs.sendMessage(id, { v: 1, type: 'tab:state', state: 'enabled' }),
+      (id) => chrome.tabs.sendMessage(id, { v: 2, type: 'tab:state', state: 'enabled' }),
       tabId,
     );
   }
@@ -186,7 +186,7 @@ test('disable stops the capture, removes the overlay, restores the orb; repeated
 
   // Disabling again (message from the SW) is a no-op.
   await serviceWorker.evaluate(
-    (id) => chrome.tabs.sendMessage(id, { v: 1, type: 'tab:state', state: 'disabled' }),
+    (id) => chrome.tabs.sendMessage(id, { v: 2, type: 'tab:state', state: 'disabled' }),
     tabId,
   );
   await expect(root(chatgpt)).toHaveCount(0);

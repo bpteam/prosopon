@@ -112,7 +112,7 @@ test.describe('fake microphone', () => {
         f.closeVoice();
         f.openVoice();
       }, i);
-      await serviceWorker.evaluate((id) => chrome.tabs.sendMessage(id, { v: 1, type: 'tab:state', state: 'enabled' }), tabId);
+      await serviceWorker.evaluate((id) => chrome.tabs.sendMessage(id, { v: 2, type: 'tab:state', state: 'enabled' }), tabId);
     }
     expect(await micInfo(serviceWorker)).toMatchObject({ state: 'on', liveTracks: 1, pipelines: 1 });
     expect(await overlayCounts(chatgpt)).toEqual({ roots: 1, canvases: 1 });

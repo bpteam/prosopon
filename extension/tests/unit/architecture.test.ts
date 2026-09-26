@@ -182,10 +182,93 @@ describe('audio boundary between contexts', () => {
     }
   });
 
-  it('the worklet posts frames only (no samples leave the render thread)', () => {
+  it('the worklet posts frames, and samples only when a local model asked for them', () => {
     const code = readFileSync(avatarFile('audio/user/UserVoiceWorklet.ts'), 'utf8');
     const posts = [...code.matchAll(/postMessage\(([^;]*)\)/g)].map((m) => m[1]);
-    expect(posts).toHaveLength(1);
+    expect(posts).toHaveLength(2);
     expect(posts[0]).toMatch(/type: 'frame', frame: this\.analyzer\.frame\(\)/);
+    // PCM comes only from takePcm(), which stays empty unless enablePcm() ran, which needs pcmChunkSeconds.
+    expect(posts[1]).toMatch(/^message, \[pcm\.buffer\]/);
+    expect(code).toMatch(/if \(opts\.pcmChunkSeconds && opts\.pcmChunkSeconds > 0\) this\.analyzer\.enablePcm/);
+    expect(readFileSync(resolve(EXT, 'src/offscreen/audio-runtime.ts'), 'utf8')).toMatch(
+      /pcmChunkSeconds: \(\) => \(emotionHost \? PCM_CHUNK_SECONDS : undefined\)/,
+    );
+  });
+
+  it('PCM never leaves the offscreen document: it only reaches the model host', () => {
+    for (const file of ['src/offscreen/audio-runtime.ts', 'src/offscreen/ProsodyChannel.ts', 'src/offscreen/UserVoicePipeline.ts']) {
+      const code = readFileSync(resolve(EXT, file), 'utf8');
+      // Every broadcast/port message is built from a typed payload; none mentions samples.
+      for (const m of code.matchAll(/(?:broadcast|broadcastAll|send|postMessage)\(([^;]*)\)/g)) {
+        expect(m[1], `${file}: ${m[1]}`).not.toMatch(/samples|pcm/i);
+      }
+    }
+  });
+});
+
+// --- US-006: dual-channel prosody & emotion -------------------------------------------------------------------
+
+/** Source without comments (docs may name what the code must not do). */
+const code = (file: string) => readFileSync(file, 'utf8').replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '');
+
+describe('prosody/emotion analyser', () => {
+  const EMOTION_DIR = resolve(AVATAR_SRC, 'audio/emotion');
+  const files = readdirSync(EMOTION_DIR).filter((f) => f.endsWith('.ts'));
+
+  it('ProsodyEmotionAnalyzer (and all of audio/emotion) imports no Avatar, AvatarController, BehaviorMixer, three or three-vrm', () => {
+    expect(files).toContain('ProsodyEmotionAnalyzer.ts');
+    for (const f of files) {
+      const { files: reached, packages } = graph(join(EMOTION_DIR, f));
+      expect([...packages].filter(isThree), f).toEqual([]);
+      expect(rel(reached).filter((x) => FORBIDDEN_AVATAR.test(x) || /avatar\/src\/avatar\//.test(x)), f).toEqual([]);
+      // Type-only imports are skipped by graph(); the source must not name them at all.
+      expect(readFileSync(join(EMOTION_DIR, f), 'utf8'), f).not.toMatch(/from '[^']*(avatar\/Avatar|AvatarController|BehaviorMixer|three|@pixiv)[^']*'/);
+    }
+  });
+
+  it('the analyser never drives the avatar or the conversation state', () => {
+    for (const f of [...files.map((x) => join(EMOTION_DIR, x)), resolve(EXT, 'src/offscreen/ProsodyChannel.ts')]) {
+      expect(readFileSync(f, 'utf8'), f).not.toMatch(/setExpression\(|setState\(|setProcedural\(|setBoneRotation\(|setHeadRotation\(/);
+    }
+  });
+
+  it('one analyser class for both channels: no per-channel analyser copies', () => {
+    const all = [
+      ...readdirSync(resolve(AVATAR_SRC), { recursive: true }).map((f) => resolve(AVATAR_SRC, String(f))),
+      ...['src/offscreen', 'src/content', 'src/shared'].flatMap((d) => readdirSync(resolve(EXT, d)).map((f) => resolve(EXT, d, f))),
+    ].filter((f) => f.endsWith('.ts'));
+    for (const f of all) expect(readFileSync(f, 'utf8'), f).not.toMatch(/class\s+(User|Assistant)\w*(Emotion|Prosody)\w*Analy[sz]er/);
+    const runtime = readFileSync(resolve(EXT, 'src/offscreen/audio-runtime.ts'), 'utf8');
+    expect(runtime.match(/new ProsodyChannel\(/g)).toHaveLength(2); // user, and assistant per capture session
+  });
+
+  it('no speech-to-text, transcripts or text analysis anywhere', () => {
+    const pkgs = [resolve(EXT, 'package.json'), resolve(AVATAR_SRC, '../package.json')].map((f) => readFileSync(f, 'utf8'));
+    for (const p of pkgs) expect(p).not.toMatch(/whisper|transformers|speech-to-text|vosk|deepgram|sentiment|openai/i);
+    const { packages } = graph(resolve(EXT, 'src/offscreen/audio-runtime.ts'));
+    expect([...packages].filter((p) => !/^(onnxruntime-web|wlipsync)/.test(p))).toEqual([]);
+    for (const dir of [resolve(AVATAR_SRC, 'audio'), resolve(EXT, 'src')]) {
+      for (const f of readdirSync(dir, { recursive: true }).map(String).filter((x) => x.endsWith('.ts'))) {
+        expect(code(join(dir, f)), f).not.toMatch(/SpeechRecognition|transcri(pt|be)/i);
+      }
+    }
+  });
+});
+
+describe('behaviour ownership', () => {
+  it('only BehaviorMixer maps emotion to pose/expressions; content code never writes expressions', () => {
+    for (const f of readdirSync(resolve(EXT, 'src/content'))) {
+      expect(readFileSync(resolve(EXT, 'src/content', f), 'utf8'), f).not.toMatch(/setExpression\(|setProcedural\(/);
+    }
+    const channels = code(avatarFile('avatar/EmotionChannels.ts'));
+    expect(channels).not.toMatch(/\b(happy|relaxed|surprised|headYaw|gazeYaw|lean|setExpression|setProcedural)\b/);
+    const mixer = readFileSync(avatarFile('avatar/BehaviorMixer.ts'), 'utf8');
+    expect(mixer).toMatch(/o\.happy = /);
+  });
+
+  it('emotion never writes visemes: the mixer takes aa/ih/ou/ee/oh from the mouth source only', () => {
+    const mixer = readFileSync(avatarFile('avatar/BehaviorMixer.ts'), 'utf8');
+    const writes = [...mixer.matchAll(/o\.(aa|ih|ou|ee|oh)\s*=\s*([^;]+);/g)].map((m) => m[2]!.trim());
+    for (const w of writes) expect(w).toMatch(/^(mouth(\.(aa|ih|ou|ee|oh))?|o\.\w+ = .*|0)$/);
   });
 });

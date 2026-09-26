@@ -38,12 +38,20 @@ const shared = {
   },
 };
 
-/** Files that are not imported by code: manifest and the wLipSync worklet/WASM for the CSP-safe split build. */
+/**
+ * Files that are not imported by code: manifest, the wLipSync worklet/WASM for the CSP-safe split build, and ONNX
+ * Runtime's WebAssembly binary for the optional local emotion model (the one build that serves both the WebGPU and
+ * the WASM backend; it's loaded only when emotion-model/model.json exists).
+ */
 function copyStatic() {
   const files = [
     [resolve(root, 'manifest.json'), 'manifest.json'],
     [resolve(avatarRoot, 'node_modules/wlipsync/dist/audio-processor.js'), 'lipsync/wlipsync/audio-processor.js'],
     [resolve(avatarRoot, 'node_modules/wlipsync/dist/wlipsync.wasm'), 'lipsync/wlipsync/wlipsync.wasm'],
+    [
+      resolve(avatarRoot, 'node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.jsep.wasm'),
+      'ort/ort-wasm-simd-threaded.jsep.wasm',
+    ],
   ];
   return {
     name: 'prosopon-copy-static',

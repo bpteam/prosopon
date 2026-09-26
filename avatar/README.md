@@ -1,4 +1,4 @@
-# Avatar sandbox (US-001, US-002, US-003)
+# Avatar sandbox (US-001, US-002, US-003, US-006)
 
 Standalone browser sandbox for developing the VRM avatar renderer. It has no dependencies on ChatGPT or Chrome Extension APIs.
 
@@ -147,6 +147,25 @@ Known limits: HeadAudio's model is English-only, the example wLipSync profile is
 been validated on real Russian or ChatGPT voice output yet. Both analysers lag the amplitude path by roughly their
 window (~50–70 ms); opening timing follows amplitude, only the shape arrives late.
 
+### Prosody & emotion (US-006)
+
+`audio/emotion/` knows audio features and `EmotionFrame` only (architecture-tested: no Avatar, mixer or three.js):
+
+- `ProsodyEmotionAnalyzer` — one per voice channel. Rolling 1.5 s window of voice-feature frames → cues (energy,
+  pitch lift/variation, syllable rate, brightness, pauses, voiced ratio) → explicit rules → targets, followed by
+  attack/release EMAs behind a 0.04 hysteresis band, 8 Hz out. Arousal mixes an absolute scale with the channel's own
+  slow baseline (`baselineWeight`). Silence: `active` off (hysteresis on speech coverage), everything returns to
+  neutral over ~1 s.
+- `EmotionModelHost` + `OnnxEmotionModel` — optional local model (ONNX Runtime Web, WebGPU → WASM), fused into
+  arousal/valence and `valenceConfidence`; load/inference failures and timeouts → mode `fallback`, rules only.
+- Avatar side: `EmotionChannels` (two independent followers + the debug on/off switches) is the `EmotionSource`;
+  `BehaviorMixer` alone maps it (`EmotionMixConfig`, all bounds subtle), weighted by the state profile and confidence.
+
+The **Emotion / Prosody** GUI folder is the calibration bench: play a recorded ChatGPT answer (Lip Sync → *play audio
+file*) or the mic, route it as the assistant's or the user's channel, watch both channels' values and the effective
+mix, move the analyser/mapping sliders, and *copy changed settings (JSON)*. *load ./emotion-model/model.json* tries a
+local model from `public/emotion-model/`.
+
 ### Pose layering
 
 `Avatar` composes two layers once per frame:
@@ -154,7 +173,12 @@ window (~50–70 ms); opening timing follows amplitude, only the shape arrives l
 | layer      | written by                                           | composition                              |
 |------------|------------------------------------------------------|------------------------------------------|
 | manual     | `setExpression`, `setBoneRotation`, `setHeadRotation`| base value                               |
-| procedural | `setProcedural` (AvatarController: idle × state + mouth) | added to bones; `blink`, `aa/ih/ou/ee/oh` = `max(manual, procedural)` |
+| procedural | `setProcedural` (AvatarController: idle × state + mouth + emotion) | added to bones; `blink`, `aa/ih/ou/ee/oh`, `happy/relaxed/sad/angry/surprised` = `max(manual, procedural)` |
+
+Expression owners: visemes → lip sync, emotion presets → emotion layer, `blink` → idle, anything → manual/debug.
+VRM `overrideMouth`/`overrideBlink: blend` on an emotion preset would scale visemes/blink by `1 − Σweights` in
+three-vrm; `Avatar` divides them by that factor first, so an active smile doesn't weaken articulation. Presets
+that `block` get no procedural emotion.
 
 Because of the layering, debug sliders and idle motion don't overwrite each other. Rotations of bones that `Avatar` drives
 (head, neck, chest, spine, shoulders, and anything set via `setBoneRotation`) are rewritten every frame, so write
@@ -187,7 +211,7 @@ Exception: a change to `AvatarLoader.ts` only affects the next full reload, beca
 
 ## Dev API
 
-In dev mode, `window.__AVATAR_DEBUG__ = { loaded, error, fps, avatar, idle, stage, controller, audio, lipSync, visemes, analyzers, state }`
+In dev mode, `window.__AVATAR_DEBUG__ = { loaded, error, fps, avatar, idle, stage, controller, audio, lipSync, visemes, analyzers, emotion, emotionPanel, state }`
 (`state` is a live getter; `controller` and `state` exist before the model is loaded, `avatar` is `null` until then).
 `<body data-avatar-loaded>` is `false` → `true`, or `error` (with `data-avatar-error`) if loading fails.
 `<body data-avatar-state>` mirrors the conversation state from the start. Load errors also go to

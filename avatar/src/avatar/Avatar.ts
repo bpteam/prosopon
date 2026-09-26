@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import type { VRMHumanBoneName } from '@pixiv/three-vrm';
 import { CLOSED_MOUTH, VISEMES, type MouthShape, type Viseme } from './MouthShape';
+import { EMOTION_EXPRESSIONS, NO_EMOTION_EXPRESSIONS, isEmotionExpression, type EmotionExpressions } from './EmotionExpression';
 
 export type HumanBoneName = VRMHumanBoneName;
 
@@ -22,7 +23,15 @@ export interface AvatarRuntime {
     getRawBoneNode(name: HumanBoneName): THREE.Object3D | null;
   };
   readonly expressionManager?: {
-    readonly expressions: ReadonlyArray<{ readonly expressionName: string }>;
+    /**
+     * overrideMouth/overrideBlink as in VRM 1.0 ('none' | 'blend' | 'block'): how much an expression suppresses the
+     * mouth/blink presets while it is on. three-vrm multiplies those by 1 − Σ(override amounts).
+     */
+    readonly expressions: ReadonlyArray<{
+      readonly expressionName: string;
+      readonly overrideMouth?: string;
+      readonly overrideBlink?: string;
+    }>;
     setValue(name: string, weight: number): void;
   } | null;
   readonly lookAt?: {
@@ -40,8 +49,8 @@ export function isViseme(name: string): name is Viseme {
   return VISEME_SET.has(name);
 }
 
-/** Output of procedural animation (idle, later lip-sync etc.). Additive on top of the manual layer. */
-export interface ProceduralPose extends MouthShape {
+/** Output of procedural animation (idle, lip sync, emotion). Combined with the manual layer. */
+export interface ProceduralPose extends MouthShape, EmotionExpressions {
   /** Head offsets, radians. */
   headYaw: number;
   headPitch: number;
@@ -56,6 +65,7 @@ export interface ProceduralPose extends MouthShape {
   gazeYaw: number;
   gazePitch: number;
   // aa/ih/ou/ee/oh (MouthShape): procedural viseme weights from lip sync, combined with manual values via max().
+  // happy/relaxed/sad/angry/surprised (EmotionExpressions): emotion layer weights, combined with manual via max().
 }
 
 export const EMPTY_PROCEDURAL_POSE: Readonly<ProceduralPose> = Object.freeze({
@@ -68,6 +78,7 @@ export const EMPTY_PROCEDURAL_POSE: Readonly<ProceduralPose> = Object.freeze({
   gazeYaw: 0,
   gazePitch: 0,
   ...CLOSED_MOUTH,
+  ...NO_EMOTION_EXPRESSIONS,
 });
 
 export interface AvatarLogger {
@@ -99,6 +110,18 @@ const LEAN = {
 
 const BLINK_EXPRESSION = 'blink';
 
+/**
+ * Lowest mouth/blink multiplier the override compensation divides by. Below it the emotion is strong enough that the
+ * model's author meant the mouth to give way (the mixer keeps procedural emotion far from it).
+ */
+const MIN_OVERRIDE_MULTIPLIER = 0.5;
+
+type Override = 'none' | 'blend' | 'block';
+
+function override(value: string | undefined): Override {
+  return value === 'blend' || value === 'block' ? value : 'none';
+}
+
 interface DrivenBone {
   readonly name: HumanBoneName;
   readonly node: THREE.Object3D;
@@ -120,6 +143,10 @@ export class Avatar {
   private readonly expressionSet: ReadonlySet<string>;
   private readonly manualExpressions = new Map<string, number>();
   private readonly warnedExpressions = new Set<string>();
+  private readonly mouthOverride = new Map<string, Override>();
+  private readonly blinkOverride = new Map<string, Override>();
+  /** Final weight per expression of the current frame (scratch, reused). */
+  private readonly weights: number[] = [];
 
   private readonly drivenBones: DrivenBone[] = [];
   private readonly drivenByName = new Map<HumanBoneName, DrivenBone>();
@@ -142,6 +169,19 @@ export class Avatar {
     const expressions = vrm.expressionManager?.expressions ?? [];
     this.expressionNames = expressions.map((e) => e.expressionName);
     this.expressionSet = new Set(this.expressionNames);
+    for (const e of expressions) {
+      this.mouthOverride.set(e.expressionName, override(e.overrideMouth));
+      this.blinkOverride.set(e.expressionName, override(e.overrideBlink));
+    }
+    const blocking = EMOTION_EXPRESSIONS.filter(
+      (n) => this.mouthOverride.get(n) === 'block' || this.blinkOverride.get(n) === 'block',
+    );
+    if (blocking.length > 0) {
+      // A 'block' expression switches the mouth off entirely at any weight: procedural emotion would stop lip sync.
+      this.logger.warn(
+        `[Avatar] ${blocking.join(', ')} block the mouth or blink on this model; the emotion layer leaves them alone`,
+      );
+    }
 
     // Bones driven by procedural animation are always registered.
     for (const bone of ['head', 'neck', 'chest', 'spine', 'leftShoulder', 'rightShoulder'] as const) {
@@ -274,6 +314,7 @@ export class Avatar {
     p.gazeYaw = pose.gazeYaw;
     p.gazePitch = pose.gazePitch;
     for (const v of VISEMES) p[v] = clamp01(pose[v]);
+    for (const e of EMOTION_EXPRESSIONS) p[e] = clamp01(pose[e]);
   }
 
   getProcedural(): Readonly<ProceduralPose> {
@@ -352,11 +393,33 @@ export class Avatar {
     const manager = this.vrm.expressionManager;
     if (!manager) return;
     const names = this.expressionNames;
+    const w = this.weights;
+    w.length = names.length;
+    // 1. Final weight per expression: manual, max() with the procedural owner of that preset.
+    let mouthSuppression = 0;
+    let blinkSuppression = 0;
     for (let i = 0; i < names.length; i++) {
       const name = names[i]!;
       let value = this.manualExpressions.get(name) ?? 0;
       if (name === BLINK_EXPRESSION) value = Math.max(value, this.procedural.blink);
       else if (isViseme(name)) value = Math.max(value, this.procedural[name]);
+      else if (isEmotionExpression(name) && this.mouthOverride.get(name) !== 'block' && this.blinkOverride.get(name) !== 'block') {
+        value = Math.max(value, this.procedural[name]);
+      }
+      w[i] = value;
+      mouthSuppression += amount(this.mouthOverride.get(name), value);
+      blinkSuppression += amount(this.blinkOverride.get(name), value);
+    }
+    // 2. Override compensation. three-vrm scales mouth/blink presets by 1 − Σ(override amounts), so a 0.3 smile
+    //    with overrideMouth 'blend' would cut every viseme by 30 %. Lip sync owns articulation and idle owns the
+    //    blink: divide their weights by the same factor so what's rendered is what they asked for.
+    const mouthGain = 1 / Math.max(MIN_OVERRIDE_MULTIPLIER, 1 - mouthSuppression);
+    const blinkGain = 1 / Math.max(MIN_OVERRIDE_MULTIPLIER, 1 - blinkSuppression);
+    for (let i = 0; i < names.length; i++) {
+      const name = names[i]!;
+      let value = w[i]!;
+      if (mouthGain !== 1 && isViseme(name)) value = Math.min(1, value * mouthGain);
+      else if (blinkGain !== 1 && name === BLINK_EXPRESSION) value = Math.min(1, value * blinkGain);
       manager.setValue(name, value);
     }
   }
@@ -381,6 +444,13 @@ export class Avatar {
       .addScaledVector(this.scratchRight, dx)
       .addScaledVector(this.scratchUp, dy);
   }
+}
+
+/** Override amount of one expression at `weight`, as three-vrm computes it. */
+function amount(mode: Override | undefined, weight: number): number {
+  if (mode === 'blend') return weight;
+  if (mode === 'block') return weight > 0 ? 1 : 0;
+  return 0;
 }
 
 export function clamp01(value: number): number {

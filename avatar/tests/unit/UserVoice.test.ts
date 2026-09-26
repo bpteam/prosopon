@@ -274,3 +274,46 @@ describe('isUserVoiceFrame', () => {
     expect(isUserVoiceFrame(null)).toBe(false);
   });
 });
+
+describe('UserVoiceAnalyzer spectral features (US-006)', () => {
+  const run = (samples: Float32Array) => {
+    const a = new UserVoiceAnalyzer(SR);
+    const frames = [];
+    for (let i = 0; i < samples.length; i += 960) {
+      a.process(samples.subarray(i, i + 960));
+      frames.push(a.frame());
+    }
+    return { a, frames };
+  };
+  const mean = (xs: number[]) => xs.reduce((s, x) => s + x, 0) / Math.max(1, xs.length);
+
+  it('a brighter voice has a higher centroid and roll-off; silence reports 0', () => {
+    const dull = run(signal([{ kind: 'silence', seconds: 0.5 }, { kind: 'sine', seconds: 2, hz: 200, amp: 0.2 }]));
+    const bright = run(signal([{ kind: 'silence', seconds: 0.5 }, { kind: 'sine', seconds: 2, hz: 2500, amp: 0.2 }]));
+    const voiced = (r: ReturnType<typeof run>) => r.frames.filter((f) => f.speaking).slice(10);
+    expect(mean(voiced(dull).map((f) => f.spectralCentroid))).toBeLessThan(600);
+    expect(mean(voiced(bright).map((f) => f.spectralCentroid))).toBeGreaterThan(2000);
+    expect(mean(voiced(bright).map((f) => f.spectralRolloff))).toBeGreaterThan(mean(voiced(dull).map((f) => f.spectralRolloff)));
+    expect(mean(voiced(bright).map((f) => f.zeroCrossingRate))).toBeGreaterThan(mean(voiced(dull).map((f) => f.zeroCrossingRate)));
+    const quiet = run(signal([{ kind: 'silence', seconds: 1.5 }]));
+    for (const f of quiet.frames) {
+      expect(f.spectralCentroid).toBe(0);
+      expect(f.zeroCrossingRate).toBe(0);
+    }
+  });
+
+  it('keeps no samples unless a local model asked for them', () => {
+    const { a } = run(signal([{ kind: 'speech', seconds: 1 }]));
+    expect(a.takePcm()).toBeNull();
+    const b = new UserVoiceAnalyzer(SR);
+    b.enablePcm(0.1);
+    b.process(signal([{ kind: 'speech', seconds: 1 }]));
+    const chunk = b.takePcm();
+    expect(chunk).toBeInstanceOf(Float32Array);
+    expect(chunk!.length).toBe(Math.round(b.decimatedRate * 0.1));
+    // Bounded: an undrained collector holds at most a few chunks.
+    let n = 0;
+    while (b.takePcm()) n++;
+    expect(n).toBeLessThanOrEqual(3);
+  });
+});
