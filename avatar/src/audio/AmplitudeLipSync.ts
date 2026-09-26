@@ -1,4 +1,4 @@
-import type { MouthSource } from '../avatar/AvatarController';
+import type { MouthSource } from '../avatar/MouthShape';
 
 export interface AmplitudeLipSyncConfig {
   enabled: boolean;

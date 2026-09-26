@@ -1,5 +1,4 @@
-import { CLOSED_MOUTH, VISEMES, type MouthShape } from '../avatar/Avatar';
-import type { MouthSource } from '../avatar/AvatarController';
+import { CLOSED_MOUTH, VISEMES, type MouthShape, type MouthSource } from '../avatar/MouthShape';
 import { follow, type AmplitudeLipSync } from './AmplitudeLipSync';
 import type { VisemeAnalyzer } from './VisemeAnalyzer';
 

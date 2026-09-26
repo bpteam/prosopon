@@ -1,4 +1,4 @@
-import type { MouthShape } from '../../avatar/Avatar';
+import type { MouthShape } from '../../avatar/MouthShape';
 import { assertAudioWorklet, type VisemeAnalyzer, type VisemeAnalyzerFactory } from '../VisemeAnalyzer';
 
 /** uLipSync phoneme (profile entry name) → VRM mouth shape. The sample profile uses A/I/U/E/O/S. */
@@ -13,6 +13,12 @@ export const ULIPSYNC_TO_VRM: Readonly<Record<string, Readonly<Partial<MouthShap
 
 export interface WLipSyncOptions {
   profileUrl?: string;
+  /**
+   * Load the worklet processor and the WASM module from these URLs instead of the package's single-file build,
+   * which registers its worklet from a data: URL. Needed where CSP only allows 'self' scripts (extension pages).
+   * Copy them from wlipsync/dist/audio-processor.js and wlipsync/dist/wlipsync.wasm.
+   */
+  assets?: { processorUrl: string; wasmUrl: string };
   /** wLipSync's own smooth-damp time, seconds. Kept short because VisemeLipSync smooths again. */
   smoothness?: number;
 }
@@ -28,7 +34,7 @@ export function wLipSyncFactory(options: WLipSyncOptions = {}): VisemeAnalyzerFa
   return async (context) => {
     assertAudioWorklet(context);
     const [{ createWLipSyncNode, parseBinaryProfile }, response] = await Promise.all([
-      import('wlipsync'),
+      options.assets ? loadSplitBuild(context, options.assets) : import('wlipsync'),
       fetch(options.profileUrl ?? DEFAULT_PROFILE_URL),
     ]);
     if (!response.ok) throw new Error(`wLipSync profile: HTTP ${response.status}`);
@@ -37,6 +43,16 @@ export function wLipSyncFactory(options: WLipSyncOptions = {}): VisemeAnalyzerFa
     node.smoothness = options.smoothness ?? 0.02;
     return new WLipSyncAnalyzer(node);
   };
+}
+
+async function loadSplitBuild(context: AudioContext, assets: { processorUrl: string; wasmUrl: string }) {
+  const [lib, wasmModule] = await Promise.all([
+    import('wlipsync/wlipsync.js'),
+    WebAssembly.compileStreaming(fetch(assets.wasmUrl)),
+    context.audioWorklet.addModule(assets.processorUrl),
+  ]);
+  lib.configuration.wasmModule = wasmModule;
+  return lib;
 }
 
 interface WLipSyncNode extends AudioNode {

@@ -1,18 +1,12 @@
 import type * as THREE from 'three';
-import { CLOSED_MOUTH, type Avatar, type BoneRotation, type HumanBoneName, type MouthShape } from './Avatar';
+import type { Avatar, BoneRotation, HumanBoneName } from './Avatar';
+import { CLOSED_MOUTH, type MouthSource } from './MouthShape';
 import { AvatarIdleController } from './AvatarIdleController';
 import type { AvatarState, AvatarStateProfile } from './AvatarStateProfiles';
 import { BehaviorMixer } from './BehaviorMixer';
 import { ConversationStateMachine, type ConversationStateMachineOptions } from './ConversationStateMachine';
 
-/**
- * Anything that drives the mouth once per frame (amplitude lip sync, viseme analysers).
- * Pulled by AvatarController.update(), so it runs on the render loop's delta.
- */
-export interface MouthSource {
-  /** @returns mouth openness on "aa", [0, 1], or a weight per viseme preset */
-  update(deltaTime: number): number | Readonly<MouthShape>;
-}
+export type { MouthSource } from './MouthShape';
 
 export type StateChangeListener = (state: AvatarState, previous: AvatarState) => void;
 
@@ -31,7 +25,11 @@ export interface AvatarControllerApi {
 }
 
 export interface AvatarControllerOptions extends ConversationStateMachineOptions {
-  avatar: Avatar;
+  /**
+   * The avatar to drive. May be attached later with attachAvatar(): the controller (state, idle, lip sync)
+   * runs without one, so providers can talk to it while the model is still loading.
+   */
+  avatar?: Avatar | null;
   /** Created with defaults if omitted. */
   idle?: AvatarIdleController;
   /** Receives exceptions thrown by state listeners. Defaults to console.error. */
@@ -47,8 +45,8 @@ export interface AvatarControllerOptions extends ConversationStateMachineOptions
  * composes with the procedural layer, so neither overwrites the other.
  */
 export class AvatarController implements AvatarControllerApi {
-  /** Low-level runtime. For scene integration and debug tooling, not for behaviour. */
-  readonly avatar: Avatar;
+  private current: Avatar | null = null;
+  private lookAtTarget: THREE.Object3D | null = null;
   /** Idle generator. Exposed for debug tuning of its config. */
   readonly idle: AvatarIdleController;
 
@@ -59,12 +57,26 @@ export class AvatarController implements AvatarControllerApi {
   private mouthSource: MouthSource | null = null;
 
   constructor(options: AvatarControllerOptions) {
-    this.avatar = options.avatar;
     this.idle = options.idle ?? new AvatarIdleController();
     // The controller is the only writer of the procedural layer.
     this.idle.setSink(null);
     this.machine = new ConversationStateMachine(options);
     this.onListenerError = options.onListenerError ?? ((e) => console.error('[AvatarController] state listener failed:', e));
+    if (options.avatar) this.attachAvatar(options.avatar);
+  }
+
+  /** Low-level runtime, null until attached. For scene integration and debug tooling, not for behaviour. */
+  get avatar(): Avatar | null {
+    return this.current;
+  }
+
+  /**
+   * Starts driving `avatar` (or stops driving any, with null). Conversation state, idle and lip sync are not
+   * reset: an avatar that finishes loading mid-conversation picks up the current state on its first frame.
+   */
+  attachAvatar(avatar: Avatar | null): void {
+    this.current = avatar;
+    if (avatar && this.lookAtTarget) avatar.setLookAtTarget(this.lookAtTarget);
   }
 
   // --- Conversation state -------------------------------------------------
@@ -97,38 +109,39 @@ export class AvatarController implements AvatarControllerApi {
   // --- Manual layer (proxied) ---------------------------------------------
 
   setExpression(name: string, value: number): boolean {
-    return this.avatar.setExpression(name, value);
+    return this.current?.setExpression(name, value) ?? false;
   }
 
   getExpression(name: string): number {
-    return this.avatar.getExpression(name);
+    return this.current?.getExpression(name) ?? 0;
   }
 
   hasExpression(name: string): boolean {
-    return this.avatar.hasExpression(name);
+    return this.current?.hasExpression(name) ?? false;
   }
 
   listExpressions(): readonly string[] {
-    return this.avatar.listExpressions();
+    return this.current?.listExpressions() ?? [];
   }
 
   resetExpressions(): void {
-    this.avatar.resetExpressions();
+    this.current?.resetExpressions();
   }
 
   setHeadRotation(yaw: number, pitch: number, roll: number): boolean {
-    return this.avatar.setHeadRotation(yaw, pitch, roll);
+    return this.current?.setHeadRotation(yaw, pitch, roll) ?? false;
   }
 
   setBoneRotation(name: HumanBoneName, rotation: Partial<BoneRotation>): boolean {
-    return this.avatar.setBoneRotation(name, rotation);
+    return this.current?.setBoneRotation(name, rotation) ?? false;
   }
 
   // --- Gaze / idle ----------------------------------------------------------
 
   /** Anchor for the eyes (typically the camera). State only offsets gaze around it. */
   setLookAtTarget(target: THREE.Object3D | null): void {
-    this.avatar.setLookAtTarget(target);
+    this.lookAtTarget = target;
+    this.current?.setLookAtTarget(target);
   }
 
   /** Fades idle motion in/out. State offsets (posture, gaze bias) still apply while idle is off. */
@@ -157,8 +170,10 @@ export class AvatarController implements AvatarControllerApi {
     const profile = this.machine.update(deltaTime);
     const idlePose = this.idle.update(deltaTime);
     const mouth = this.mouthSource?.update(deltaTime) ?? CLOSED_MOUTH;
-    this.avatar.setProcedural(this.mixer.compose(idlePose, profile, mouth));
-    this.avatar.update(deltaTime);
+    const pose = this.mixer.compose(idlePose, profile, mouth);
+    if (!this.current) return;
+    this.current.setProcedural(pose);
+    this.current.update(deltaTime);
   }
 
   dispose(): void {

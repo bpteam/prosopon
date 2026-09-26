@@ -97,6 +97,7 @@ export class AvatarDebugPanel {
   private buildTransform(): void {
     const folder = this.gui.addFolder('Avatar');
     const avatar = this.controller.avatar;
+    if (!avatar) return;
     const t = { positionX: 0, positionY: 0, positionZ: 0, rotationY: 0, scale: 1 };
     const applyPosition = () => avatar.setPosition(t.positionX, t.positionY, t.positionZ);
     folder.add(t, 'positionX', -1, 1, 0.01).onChange(applyPosition);

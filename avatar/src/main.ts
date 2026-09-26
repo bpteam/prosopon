@@ -26,13 +26,13 @@ export interface AvatarDebugApi {
   avatar: Avatar | null;
   idle: AvatarIdleController;
   stage: AvatarStage;
-  controller: AvatarController | null;
+  controller: AvatarController;
   audio: AudioInput;
   lipSync: AmplitudeLipSync;
   visemes: VisemeLipSync;
   analyzers: VisemeAnalyzerHost;
-  /** Live getter: current conversation state, or null before the avatar is loaded. */
-  readonly state: AvatarState | null;
+  /** Live getter: current conversation state (also before the avatar is loaded). */
+  readonly state: AvatarState;
 }
 
 declare global {
@@ -62,7 +62,12 @@ const analyzers = new VisemeAnalyzerHost(
 const overlay = new DebugOverlay(document.body, stage.renderer, { loaded: false, vrmVersion: null, webgl2: stage.isWebGL2 });
 overlay.visible = import.meta.env.DEV;
 
-let controller: AvatarController | null = null;
+// Exists before the model: conversation state set while the VRM loads is kept and applied on attach.
+const controller = new AvatarController({ idle });
+controller.setMouthSource(visemes);
+document.body.dataset.avatarState = controller.getState();
+controller.onStateChange((state) => (document.body.dataset.avatarState = state));
+
 let panel: AvatarDebugPanel | null = null;
 let lipSyncPanel: LipSyncDebugPanel | null = null;
 let visemePanel: VisemeDebugPanel | null = null;
@@ -75,20 +80,20 @@ const debugApi: AvatarDebugApi = {
   avatar: null,
   idle,
   stage,
-  controller: null,
+  controller,
   audio,
   lipSync,
   visemes,
   analyzers,
   get state() {
-    return controller?.getState() ?? null;
+    return controller.getState();
   },
 };
 if (import.meta.env.DEV) window.__AVATAR_DEBUG__ = debugApi;
 
 // Single rAF loop: controller (state → idle → lip sync → composition → avatar/VRM) → render.
 const loop = new RenderLoop((delta) => {
-  controller?.update(delta);
+  controller.update(delta);
   stage.render();
   overlay.afterRender(delta);
   debugApi.fps = overlay.meter.fps;
@@ -105,26 +110,21 @@ async function boot(): Promise<void> {
     const vrm = hot?.vrm ?? (await new AvatarLoader().loadVRM(MODEL_URL));
     if (hot) hot.vrm = vrm;
 
-    const ctrl = new AvatarController({ avatar: new Avatar(vrm, { restPose: REST_POSE }), idle });
-    ctrl.setMouthSource(visemes);
-    ctrl.update(0);
-    stage.setAvatar(ctrl.avatar);
+    const avatar = new Avatar(vrm, { restPose: REST_POSE });
+    controller.attachAvatar(avatar);
+    controller.update(0);
+    stage.setAvatar(avatar);
 
-    document.body.dataset.avatarState = ctrl.getState();
-    ctrl.onStateChange((state) => (document.body.dataset.avatarState = state));
-    controller = ctrl;
-
-    panel = new AvatarDebugPanel(ctrl, {
+    panel = new AvatarDebugPanel(controller, {
       overlayVisible: overlay.visible,
       setOverlayVisible: (v) => (overlay.visible = v),
     });
     lipSyncPanel = new LipSyncDebugPanel(panel.gui, audio, lipSync);
     visemePanel = new VisemeDebugPanel(lipSyncPanel.folder, analyzers, visemes);
 
-    overlay.setInfo({ loaded: true, vrmVersion: formatVrmVersion(ctrl.avatar.vrmVersion) });
+    overlay.setInfo({ loaded: true, vrmVersion: formatVrmVersion(avatar.vrmVersion) });
     debugApi.loaded = true;
-    debugApi.avatar = ctrl.avatar;
-    debugApi.controller = ctrl;
+    debugApi.avatar = avatar;
     document.body.dataset.avatarLoaded = 'true';
   } catch (error) {
     reportError(error);
@@ -154,7 +154,7 @@ if (import.meta.hot) {
   import.meta.hot.accept();
   import.meta.hot.dispose(() => {
     loop.stop();
-    controller?.dispose();
+    controller.dispose();
     visemePanel?.dispose();
     lipSyncPanel?.dispose();
     analyzers.dispose();

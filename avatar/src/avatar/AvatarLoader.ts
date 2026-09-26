@@ -54,6 +54,11 @@ export class AvatarLoader {
   }
 }
 
+/** Frees the GPU resources (geometries, materials, textures) of a VRM that is no longer rendered. */
+export function disposeVRM(vrm: VRM): void {
+  VRMUtils.deepDispose(vrm.scene);
+}
+
 function optimize(vrm: VRM): void {
   const steps: Array<[string, () => void]> = [
     ['removeUnnecessaryVertices', () => VRMUtils.removeUnnecessaryVertices(vrm.scene)],
