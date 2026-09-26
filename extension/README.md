@@ -54,19 +54,77 @@ docker compose --profile test run --rm extension-e2e   # E2E in mcr.microsoft.co
 
 `chrome://extensions` → Developer mode → *Load unpacked* → `extension/dist`.
 
-- **Avatar.** On chatgpt.com click the Prosopon toolbar icon: the popup opens. *Enable avatar* / *Disable avatar*
-  switches the current tab. The badge shows `ON`, `…` (starting) or `!` (error; the tooltip says why). Start voice
-  mode as usual; the avatar takes the orb's place. The capture survives page reloads; leaving chatgpt.com, closing
+- **Avatar.** On chatgpt.com click the Prosopon toolbar icon: the popup opens. The *Avatar* switch turns the current
+  tab on or off. The badge shows `ON`, `…` (starting) or `!` (error; the tooltip says why). Start voice mode as
+  usual; the orb is hidden and the avatar is drawn where the layout puts it. The capture survives page reloads; leaving chatgpt.com, closing
   the tab or the stream ending disables the tab.
-- **Microphone reactions** (off by default). Right-click the toolbar icon → *Microphone reactions (audio stays
-  local)*. The first time, a Prosopon tab asks Chrome for the microphone (the offscreen document can't show a
+- **Microphone reactions** (off by default). Popup → *Microphone reactions*, or right-click the toolbar icon →
+  *Microphone reactions (audio stays local)*. The first time, a Prosopon tab asks Chrome for the microphone (the offscreen document can't show a
   prompt) and closes itself once allowed. The choice is kept in `chrome.storage.session`, so a restarted browser
   starts with the mic off. The mic is open only while the choice is on **and** a tab is enabled. Without the
   permission or a mic, the avatar and lip sync work as before.
-- **Emotion model** (optional). Popup → *Emotion Intelligence* → *Install & Enable emotions*; see
+- **Emotion model** (optional). Popup → *Emotion Intelligence* → *Install & Enable*; see
   [Emotion model](#emotion-model).
+- **Avatar layout.** Popup → *Settings*: camera preset (Face / Waist / Full body), avatar size (75–250 %), *Move
+  avatar* (closes the popup; drag the box on the page or use the arrow keys, `+`/`-` resize, Enter/Escape done),
+  *Reset layout*. Default: Waist, 150 %, centre x 0.50, y 0.54. Shared by all ChatGPT tabs, kept across restarts.
+- **Developer mode** (off by default). Popup → *Developer mode*; see [Developer mode](#developer-mode).
 
-These three are independent states.
+These are independent states.
+
+## Layout
+
+The render overlay `#prosopon-root` covers the whole viewport (`position: fixed; inset: 0; pointer-events: none`) and
+never takes a click. Where the avatar appears and how large is the camera's job (`AvatarStage`, see
+[../avatar/README.md](../avatar/README.md#camera)): a preset (a camera variant in the same scene) plus a presentation
+(normalized box centre + height = scale × 0.5 of the viewport height), drawn by a lens shift, so there is no small
+canvas to move or crop. Interactive UI (placement handle, Developer mode windows) lives in a second shadow host,
+`#prosopon-ui`, created on first use and removed when nothing needs it.
+
+Settings (`src/shared/settings.ts`), all in `chrome.storage.local`, validated and clamped on read (unknown version →
+defaults; a window restored off-screen is pulled back so at least 24 px of its header is visible):
+
+| Key | Schema |
+|---|---|
+| `prosopon.view` | `AvatarViewSettingsV1` `{version: 1, camera: {preset: 'face'\|'waist'\|'full-body', distanceOffset, targetYOffset, yaw, pitch}, placement: {x, y, scale}}` |
+| `prosopon.developerMode` | `boolean`, default `false` |
+| `prosopon.devWindows` | `DevWindowsSettingsV1` `{version: 1, windows: {hud?, devtools?, avatarControls?: {x, y, width, height, open, pinned}}, tabs: {devtools?, avatarControls?}}` |
+
+`PersistedValue` debounces writes by 250 ms, flushes on pointer-up, `change`, window close and `pagehide`, applies
+other tabs' writes live and ignores the echo of its own. Mic opt-in stays in `storage.session`; model metadata is
+described under [Emotion model](#emotion-model).
+
+## Developer mode
+
+Off by default and free when off: the Dev UI is a separate chunk (`src/ui/dev/DevTools.ts`) that
+`DevModeSwitch` imports only when `prosopon.developerMode` becomes true; turning it off disposes every window,
+buffer, chart, listener and telemetry subscription, releases the manual layer (expression preview, pose offsets) and
+scene helpers. Available in production builds too (it is a user setting, not a debug build).
+
+- **Debug HUD** (top 72, right 20, 470 wide, ≤ 70 vh): state, assistant emotion sparklines (valence, arousal,
+  energy, tension; 30 s), visemes, user voice (speaking, RMS dB, energy, pitch, confidence, relative pitch, RMS and
+  pitch graphs), active modifiers (effective gains from `AvatarController.getBehaviorSnapshot()`), performance (FPS,
+  frame time, audio latency, lip-sync frame age, inference time and backend, draw calls, triangles, memory). Header:
+  expand (→ Developer Tools), pin (a pinned HUD ignores Escape), close.
+- **Developer Tools** (900 × 620 centred; min 680 × 420; drag by the header, resize right/bottom/corner): Overview,
+  Audio, Emotion (per-channel switches), Behavior, Gestures (real `GestureEngine` types, Auto / Enabled / Cancel,
+  manual triggers), Avatar, Settings (turn Developer mode off, reset window layout, storage keys).
+- **Avatar Controls** (460 × 620, right 20, top 100): Camera (presets, distance, target height, yaw, pitch, size,
+  *Move avatar*, reset), Expressions (explicit preview that fades both emotion channels; `n/a` when the model lacks
+  one), Poses (offsets over the rest pose, *Reset pose*), Gestures, Scene (transparent background; grid, skeleton,
+  axes helpers, off by default).
+- **Quick toolbar** (bottom centre): presets, size −/+, *Move*, *Reset* (camera corrections only).
+
+Data: the render loop calls `DevToolsHandle.frame(delta)`; the Dev UI samples a `DevSample` through `DevBridge` at
+10 Hz into fixed `Float32Array` ring buffers (300 samples = 30 s per series) and repaints canvas charts of the
+visible tab at ≤ 10 Hz. It has no `requestAnimationFrame`, `setInterval` or observers of its own. Offscreen telemetry
+(audio contexts, inference time, backend) is requested with `dev:subscribe` and arrives once a second as
+`dev:telemetry` only while subscribed.
+
+Boundaries (`tests/unit/architecture.test.ts`): `src/ui/**` and `src/popup/**` import no three.js, `Avatar`,
+`AvatarController`, `BehaviorMixer`, `AvatarStage` or `RenderLoop` at runtime and never touch bones,
+`expressionManager` or `setState`; `ManualControls` is the only writer of the manual layer; the content loader
+never reaches `src/ui`. Escape closes the focused window; all windows are `role="dialog"` with labelled controls.
 
 ## Architecture
 
@@ -82,7 +140,7 @@ microphone (opt-in) ──getUserMedia──────────────
                                                             local model (if installed): EmotionModelHost, both channels
 content script ◄──────────── runtime Port (LIPSYNC_PORT) ───┘
   ContentLifecycle → (on enable) import avatar-runtime.js
-  AvatarOverlay (shadow root) · ChatGPTAdapter
+  AvatarOverlay (full-viewport shadow root) · UiLayer (in-page UI, on demand) · ChatGPTAdapter
   ConversationSignalResolver ← voice UI + LipSyncFrame.active + UserVoiceFrame.speaking → AvatarController.setState
   AvatarController ← FrameMouthSource (assistant only) + UserReactionMapper + EmotionChannels + GestureEngine
 ```
@@ -91,13 +149,14 @@ content script ◄──────────── runtime Port (LIPSYNC_POR
 |---|---|---|
 | `background/` service worker | popup/menu commands, `getMediaStreamId`, offscreen lifecycle, per-tab state (`TabSessions`), mic opt-in, `EmotionModelInstaller`, routing | DOM, audio, three.js |
 | `offscreen/` | `MediaStream`s (tab + mic), one `AudioContext` per pipeline, analysers, `ProsodyChannel`s, emotion model host, frame generation | three.js, VRM, Avatar, ChatGPT DOM; mixing the two signals |
-| `content/` | overlay, renderer, `AvatarController`, `ConversationSignalResolver`, ChatGPT DOM (in `ChatGPTAdapter` only) | audio nodes, PCM, streams |
-| `popup/` | avatar toggle for the active tab, emotion model controls | analysis, rendering |
+| `content/` | overlay, renderer, `AvatarController`, `ConversationSignalResolver`, ChatGPT DOM (in `ChatGPTAdapter` only), `DevBridge` implementation | audio nodes, PCM, streams |
+| `ui/` | in-page UI: `UiLayer`, placement handle, Developer mode windows (through `DevBridge` only) | three.js, bones, expressions, ChatGPT DOM |
+| `popup/` | avatar toggle, mic reactions, layout settings, Developer mode switch, emotion model controls | analysis, rendering |
 | `permission/` | the one-time microphone grant for the extension origin | analysis (the track is stopped at once) |
 | `emotion/` | model manifest, installer, IndexedDB storage, installed-model reader | audio processing, rendering |
 
-The service worker, offscreen, content and worklet boundaries are enforced by `tests/unit/architecture.test.ts`
-on the import graph; `popup/` and `emotion/` have no such test.
+The service worker, offscreen, content, worklet, `ui/` and `popup/` boundaries are enforced by
+`tests/unit/architecture.test.ts` on the import graph; `emotion/` has no such test.
 
 - **Reuse, not copies.** All avatar/audio code is imported from `avatar/src` (`@avatar/*`). Cross-context contracts
   live in the core too: `LipSyncFrame`, `FrameMouthSource`, `MouthShape`, `UserVoiceFrame`, `EmotionFrame`.
@@ -197,7 +256,7 @@ IndexedDB. The `PROSOPON_EMBED_MODEL=1 …` script syntax needs a POSIX shell (u
 | `offscreen` | the audio document (`USER_MEDIA` reason: covers tab and mic) |
 | `scripting` | re-injecting `content.js` into open chatgpt.com tabs after install/update |
 | `contextMenus` | the *Microphone reactions* checkbox on the toolbar icon |
-| `storage` | mic opt-in (`storage.session`), emotion model metadata (`storage.local`) |
+| `storage` | mic opt-in (`storage.session`); emotion model metadata, layout, Developer mode, window layout (`storage.local`) |
 | host `https://chatgpt.com/*` | content script, tab URLs, web-accessible avatar runtime |
 | host `https://huggingface.co/*` | the pinned model download |
 
@@ -205,19 +264,19 @@ IndexedDB. The `PROSOPON_EMBED_MODEL=1 …` script syntax needs a POSIX shell (u
 
 ## Debugging (development builds)
 
-- The diagnostics overlay over the avatar shows state, lip sync, user voice, conversation signals, emotion and
-  gestures.
+- Diagnostics are in [Developer mode](#developer-mode) (every build). Development builds additionally write
+  diagnostics as `data-*` attributes on the overlay host (used by E2E).
 - `window.__PROSOPON_DEBUG__` lives in the content script's isolated world: pick the Prosopon context in the
   DevTools console's context selector.
 - Page-console events: `prosopon:debug` (e.g. `{ emotionConfig: { baselineWeight: 0.3 } }`) and `prosopon:gesture`
-  (`trigger`, `cancel`, `auto`, `seed`, `config`); the overlay host exposes `data-*` attributes used by E2E.
+  (`trigger`, `cancel`, `auto`, `seed`, `config`), `prosopon:emotion` (`{channel, enabled}`).
 - Calibration procedures: [../docs/emotion-calibration.md](../docs/emotion-calibration.md) (prosody/emotion),
   [../docs/gesture-calibration.md](../docs/gesture-calibration.md) (gestures).
 
 ## Known limitations
 
 - **ChatGPT selectors** in `CHATGPT_SELECTORS` (`ChatGPTAdapter.ts`) were checked against production on 2026-09-26
-  and will drift. If nothing matches, the avatar sits bottom-right and the orb stays visible. Update them from
+  and will drift. If nothing matches, the avatar stays where the layout puts it and the orb stays visible. Update them from
   DevTools; the E2E fixture (`tests/e2e/fixtures/chatgpt.html`) mirrors them.
 - **Echo cancellation.** While captured, the tab's audio is played by the offscreen document. Whether ChatGPT's own
   echo cancellation still gets its reference signal is untested: on speakers, check that ChatGPT doesn't hear and
@@ -239,8 +298,11 @@ IndexedDB. The `PROSOPON_EMBED_MODEL=1 …` script syntax needs a POSIX shell (u
   output tensor with range [−1, 1]; the manifest's `outputNames` (`arousal`, `valence`) are not passed to the
   runtime. This mapping has not been checked against the real model's outputs.
 - **Popup details.** *Cancel* during a download ends in the `error` state (with the abort message), not
-  `not-installed`. The popup shows the size as ~51 MB in one place and 48.3 MB (MiB) in another. A manifest change
-  leaves the previous model's Blob in IndexedDB.
+  `not-installed`. A manifest change leaves the previous model's Blob in IndexedDB.
+- **Layout on real ChatGPT.** Default placement and the Developer mode windows are tested on the fixture page only;
+  how they sit over the real composer and sidebar is a manual check. The layout is one for all tabs and sizes.
+- **Move avatar from the popup** needs the popup to close first (it does), so the handle appears on the page with
+  focus; if the active tab isn't an enabled ChatGPT tab, nothing happens.
 - **VRM expression overrides.** Presets with `overrideMouth: blend` are pre-compensated; a model whose emotion
   presets `block` the mouth gets no procedural emotion on them (warned once).
 
@@ -248,7 +310,9 @@ IndexedDB. The `PROSOPON_EMBED_MODEL=1 …` script syntax needs a POSIX shell (u
 
 ```bash
 npm test          # unit: protocol, manifest, TabSessions/ContentLifecycle idempotency, ChatGPTAdapter (DOM fixtures),
-                  # ConversationSignalResolver, UserVoicePipeline (fake Web Audio graph), architecture rules
+                  # ConversationSignalResolver, UserVoicePipeline (fake Web Audio graph), architecture rules,
+                  # settings (schema, roundtrip, debounce, clamp), ring buffer, Dev UI (happy-dom: windows, Dev Mode
+                  # switch, toolbar, placement handle, ManualControls)
 npm run test:e2e  # builds dist/ in development mode, then Playwright with the unpacked extension
 ```
 
@@ -257,13 +321,17 @@ E2E runs Chromium headless with the extension on a routed `https://chatgpt.com/`
 `--allowlisted-extension-id=<id>` lets the service worker's dev hook start `tabCapture` without a toolbar click, and
 Playwright's default `--mute-audio` is removed so the captured audio isn't silence.
 
-- `extension.spec.ts`: load, enable/disable, orb hide/restore, no duplicate runtimes on SPA navigation, real tab
+- `extension.spec.ts`: load, enable/disable, full-viewport click-through overlay, orb hide/restore, no duplicate runtimes on SPA navigation, real tab
   audio → offscreen → Port → mouth, viseme analyser fallback, reload.
 - `user-voice.spec.ts`: Chromium's fake microphone (`--use-fake-device-for-media-stream` +
   `--use-file-for-fake-audio-capture=<wav>%noloop`, WAV from `tests/e2e/fakeMic.ts`). `--use-fake-ui-for-media-stream`
   is deliberately absent: with it, tabCapture's stream id fails with "Requested device not found". The test grants
   the mic context-wide; the denial test checks the permission page opens and everything else keeps working.
-- `emotion.spec.ts`: assistant and user channels through to the mixer, interruption priority swap, debug switches;
+- `dev-mode.spec.ts`: popup → storage → page; the Developer mode flow (HUD once, Developer Tools, Avatar Controls,
+  presets, size, keyboard placement, Escape, window drag + persistence, reload restores, off removes everything,
+  avatar keeps running).
+- `emotion.spec.ts`: assistant and user channels through to the mixer, interruption priority swap, the Dev Tools
+  emotion switch;
   local-model tests on WASM, WebGPU (SwiftShader: `--enable-unsafe-webgpu --use-webgpu-adapter=swiftshader`) and a
   model that fails to load, using the `avatar/tests/fixtures/loudness-probe.onnx` plumbing fixture.
 

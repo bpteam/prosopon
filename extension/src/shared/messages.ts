@@ -7,7 +7,7 @@ import { EMOTION_CHANNELS, isEmotionFrame, type EmotionChannel, type EmotionFram
  * Bump when a message changes shape: contexts of different versions (content scripts left over from before an
  * extension update) then ignore each other instead of misreading.
  */
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 
 /** Port the content script opens to the offscreen document to receive lip-sync frames for its tab. */
 export const LIPSYNC_PORT = 'prosopon:lipsync';
@@ -68,6 +68,35 @@ export interface EmotionModelInstallState {
 }
 type AnalyzerModeName = EmotionFrame['mode'];
 
+/** One AudioContext of the offscreen document (developer telemetry). */
+export interface AudioContextTelemetry {
+  id: 'assistant' | 'mic';
+  state: string;
+  sampleRate: number;
+  /** AudioContext.baseLatency / outputLatency, ms (null where the browser doesn't report it). */
+  baseLatencyMs: number | null;
+  outputLatencyMs: number | null;
+}
+
+/**
+ * Offscreen → content, 2 per second, only to a port that asked with dev:subscribe (Developer Mode on). Numbers
+ * only: no audio.
+ */
+export interface DevTelemetry {
+  contexts: AudioContextTelemetry[];
+  /** Wall time of the last model inference, ms (null: no model or none yet). */
+  emotionInferenceMs: number | null;
+  emotionBackend: AnalyzerModeName;
+  /** VisemeAnalyzerHost status of this tab's capture. */
+  analyzer: string;
+  /** Unmapped assistant level at the analyser, dBFS (null: silence/no input). */
+  assistantRmsDb: number | null;
+  /** The assistant's prosody feature worklet is attached. */
+  featureWorklet: boolean;
+  /** The microphone's worklet is running. */
+  micWorklet: boolean;
+}
+
 export type ExtensionPayload =
   /** SW → offscreen. Reply: CaptureReply. */
   | { type: 'capture:start'; tabId: number; streamId: string }
@@ -121,6 +150,16 @@ export type ExtensionPayload =
    * calibration (applied to both channels' analysers). Ignored by production builds.
    */
   | { type: 'debug:emotion-config'; config: Record<string, number> }
+  /** Content → offscreen over LIPSYNC_PORT: send (or stop sending) dev:telemetry to this port (Developer Mode). */
+  | { type: 'dev:subscribe'; enabled: boolean }
+  /** Offscreen → content over LIPSYNC_PORT, 2 per second while subscribed. */
+  | { type: 'dev:telemetry'; telemetry: DevTelemetry }
+  /** Popup → content of the active tab: start/stop dragging the avatar into place. */
+  | { type: 'ui:placement'; active: boolean }
+  /** Popup → SW: the "Microphone reactions" opt-in. Reply: MicPreference. */
+  | { type: 'mic:preference' }
+  /** Popup → SW: set the opt-in (same as the toolbar context menu). Reply: MicPreference. */
+  | { type: 'mic:set-preference'; enabled: boolean }
   /** Content → SW: a failure that doesn't stop the capture (the VRM failed to load, etc.). */
   | { type: 'extension:error'; error: string }
   /**
@@ -132,6 +171,13 @@ export type ExtensionPayload =
 export type ExtensionMessage = ExtensionPayload & { v: typeof PROTOCOL_VERSION };
 export type MessageType = ExtensionMessage['type'];
 export type MessageOf<T extends MessageType> = Extract<ExtensionMessage, { type: T }>;
+
+/** Reply to mic:preference / mic:set-preference. */
+export interface MicPreference {
+  enabled: boolean;
+  /** Offscreen pipeline status when a tab is enabled; null otherwise. */
+  status: MicStatus | null;
+}
 
 export type CaptureReply = { ok: true } | { ok: false; error: string };
 export interface CaptureListReply {
@@ -177,6 +223,11 @@ const VALIDATORS: Record<MessageType, Validator> = {
   'debug:analyzer': (m) => m.choice === 'headaudio' || m.choice === 'wlipsync' || m.choice === 'none',
   'emotion:frame': (m) => EMOTION_CHANNELS.includes(m.channel as EmotionChannel) && isEmotionFrame(m.frame),
   'emotion:status': (m) => isEmotionStatus(m.status),
+  'dev:subscribe': (m) => typeof m.enabled === 'boolean',
+  'dev:telemetry': (m) => isDevTelemetry(m.telemetry),
+  'ui:placement': (m) => typeof m.active === 'boolean',
+  'mic:preference': () => true,
+  'mic:set-preference': (m) => typeof m.enabled === 'boolean',
   'debug:emotion-config': (m) => {
     const c = m.config as Record<string, unknown> | null;
     if (!c || typeof c !== 'object' || Array.isArray(c)) return false;
@@ -198,6 +249,28 @@ export function isEmotionStatus(raw: unknown): raw is EmotionStatus {
     Number.isInteger(s.inferences) &&
     s.inferences >= 0 &&
     (s.error === undefined || typeof s.error === 'string')
+  );
+}
+
+const nullableNumber = (v: unknown) => v === null || (typeof v === 'number' && Number.isFinite(v));
+
+export function isDevTelemetry(raw: unknown): raw is DevTelemetry {
+  if (!raw || typeof raw !== 'object') return false;
+  const t = raw as Record<string, unknown>;
+  return (
+    Array.isArray(t.contexts) &&
+    t.contexts.length <= 4 &&
+    t.contexts.every((c) => {
+      const x = c as Record<string, unknown> | null;
+      return !!x && (x.id === 'assistant' || x.id === 'mic') && typeof x.state === 'string' && typeof x.sampleRate === 'number' &&
+        nullableNumber(x.baseLatencyMs) && nullableNumber(x.outputLatencyMs);
+    }) &&
+    nullableNumber(t.emotionInferenceMs) &&
+    MODES.includes(t.emotionBackend as AnalyzerModeName) &&
+    typeof t.analyzer === 'string' &&
+    nullableNumber(t.assistantRmsDb) &&
+    typeof t.featureWorklet === 'boolean' &&
+    typeof t.micWorklet === 'boolean'
   );
 }
 

@@ -9,6 +9,10 @@ import { ConversationStateMachine, type ConversationStateMachineOptions } from '
 import { NEUTRAL_REACTION, type ReactionSource } from './UserReaction';
 import { NEUTRAL_GESTURE, type GestureContext, type GestureFrame, type GestureSource } from './gesture/Gesture';
 import { NEUTRAL_EMOTION } from '../audio/emotion/EmotionFrame';
+import type { UserReactionFrame } from './UserReaction';
+import type { BehaviorDebugSnapshot } from './BehaviorSnapshot';
+
+export type { BehaviorDebugSnapshot } from './BehaviorSnapshot';
 
 export type { MouthSource } from './MouthShape';
 export type { ReactionSource } from './UserReaction';
@@ -71,6 +75,7 @@ export class AvatarController implements AvatarControllerApi {
   private lastEmotion: Readonly<EmotionInputs> = NEUTRAL_EMOTION_INPUTS;
   private gestureSource: GestureSource | null = null;
   private lastGesture: Readonly<GestureFrame> = NEUTRAL_GESTURE;
+  private lastReaction: Readonly<UserReactionFrame> = NEUTRAL_REACTION;
   /** Reused every frame: no allocation in update(). */
   private readonly gestureContext: GestureContext = {
     conversationState: 'idle',
@@ -164,6 +169,15 @@ export class AvatarController implements AvatarControllerApi {
     return this.current?.setBoneRotation(name, rotation) ?? false;
   }
 
+  getBoneRotation(name: HumanBoneName): BoneRotation | null {
+    return this.current?.getBoneRotation(name) ?? null;
+  }
+
+  /** Manual bones back to the rest pose (arms down), not to the T-pose. The procedural layer is untouched. */
+  resetPose(): void {
+    this.current?.resetPose();
+  }
+
   // --- Gaze / idle ----------------------------------------------------------
 
   /** Anchor for the eyes (typically the camera). State only offsets gaze around it. */
@@ -249,6 +263,43 @@ export class AvatarController implements AvatarControllerApi {
     return this.mixer.pose;
   }
 
+  /**
+   * Read-only copy of what the last update() composed and with which effective gains (see BehaviorDebugSnapshot).
+   * For diagnostics UIs: calling it never changes behaviour, and it allocates, so sample it at a low rate.
+   */
+  getBehaviorSnapshot(): BehaviorDebugSnapshot {
+    const pose = this.mixer.pose;
+    const mix = this.mixer.emotionMix;
+    const g = this.lastGesture;
+    return {
+      state: this.machine.getState(),
+      weights: {
+        idle: this.idle.state.weight,
+        state: this.machine.progress,
+        assistantEmotion: mix.assistant,
+        userEmotion: mix.user,
+        userReaction: Math.min(1, Math.max(0, this.lastReaction.engagement || 0)),
+        gesture: g.active ? g.intensity : 0,
+        mouth: Math.max(pose.aa, pose.ih, pose.ou, pose.ee, pose.oh),
+      },
+      pose: { ...pose },
+      gesture: { type: g.type, phase: g.phase, progress: g.progress, intensity: g.intensity },
+      expressions: {
+        blink: pose.blink,
+        aa: pose.aa,
+        ih: pose.ih,
+        ou: pose.ou,
+        ee: pose.ee,
+        oh: pose.oh,
+        happy: pose.happy,
+        sad: pose.sad,
+        angry: pose.angry,
+        relaxed: pose.relaxed,
+        surprised: pose.surprised,
+      },
+    };
+  }
+
   // --- Frame -----------------------------------------------------------------
 
   update(deltaTime: number): void {
@@ -256,6 +307,7 @@ export class AvatarController implements AvatarControllerApi {
     const idlePose = this.idle.update(deltaTime);
     const mouth = this.mouthSource?.update(deltaTime) ?? CLOSED_MOUTH;
     const reaction = this.reactionSource?.update(deltaTime) ?? NEUTRAL_REACTION;
+    this.lastReaction = reaction;
     const emotion = this.emotionSource?.update(deltaTime) ?? NEUTRAL_EMOTION_INPUTS;
     this.lastEmotion = emotion;
     let gesture: Readonly<GestureFrame> = NEUTRAL_GESTURE;

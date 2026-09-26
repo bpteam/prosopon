@@ -1,6 +1,6 @@
 import { LIPSYNC_PORT, describeError, message, parseMessage, type ExtensionMessage } from '../shared/messages';
 import type { AvatarRuntimeHandle, AvatarRuntimeOptions } from './avatar-runtime';
-import { OVERLAY_ROOT_ID } from './AvatarOverlay';
+import { OVERLAY_ROOT_ID, UI_ROOT_ID } from './AvatarOverlay';
 import { ContentLifecycle, type ContentLifecycleDeps } from './ContentLifecycle';
 
 /**
@@ -24,6 +24,7 @@ function start(): void {
   document.dispatchEvent(new CustomEvent(TAKEOVER_EVENT));
   // An orphan whose world is gone can't answer the event: drop its root directly.
   document.getElementById(OVERLAY_ROOT_ID)?.remove();
+  document.getElementById(UI_ROOT_ID)?.remove();
 
   const reportError = (error: unknown) => {
     const text = describeError(error);
@@ -40,6 +41,7 @@ function start(): void {
         assetUrl: (path) => chrome.runtime.getURL(path),
         debug: import.meta.env.DEV,
         onError: reportError,
+        sendToOffscreen: (payload) => lifecycle.send(payload),
       });
     },
     connect(onMessage, onDisconnect) {
@@ -95,6 +97,8 @@ function start(): void {
   function onRuntimeMessage(raw: unknown): void {
     const msg: ExtensionMessage | null = parseMessage(raw);
     if (msg?.type === 'tab:state') void lifecycle.apply(msg.state, msg.error);
+    // Popup → "Move avatar": only meaningful while the avatar is mounted in this tab.
+    else if (msg?.type === 'ui:placement') lifecycle.mounted?.setPlacementMode(msg.active);
   }
   chrome.runtime.onMessage.addListener(onRuntimeMessage);
 

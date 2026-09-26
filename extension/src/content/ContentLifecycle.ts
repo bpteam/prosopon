@@ -3,7 +3,7 @@ import type { AvatarRuntimeHandle } from './avatar-runtime';
 
 export interface FrameLink {
   disconnect(): void;
-  /** Development only: sends a message back over the lip-sync port (see 'debug:analyzer'). */
+  /** Sends a message back over the lip-sync port: dev:subscribe, and in development builds 'debug:*'. */
   send?(payload: ExtensionPayload): void;
 }
 
@@ -67,7 +67,7 @@ export class ContentLifecycle {
     // 'starting': keep whatever is there; the enabled/error state follows.
   }
 
-  /** Development only: sends a payload to the offscreen runtime, if the port is open. */
+  /** Sends a payload to the offscreen runtime, if the port is open (dropped otherwise). */
   send(payload: ExtensionPayload): void {
     this.link?.send?.(payload);
   }
@@ -122,6 +122,8 @@ export class ContentLifecycle {
       runtime.pushEmotion(msg.channel, msg.frame);
     } else if (msg.type === 'emotion:status') {
       runtime.setEmotionStatus(msg.status);
+    } else if (msg.type === 'dev:telemetry') {
+      runtime.pushTelemetry(msg.telemetry);
     }
   }
 

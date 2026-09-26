@@ -15,9 +15,9 @@ looking at the model. Budget: ~20 minutes.
    - **Head Tilt**: transient, returns to neutral; must not look like the `thinking` state (set the state to
      thinking and compare: the state tilt stays, the gesture comes and goes).
    - **Body Shift / Shoulder Shift**: barely noticeable weight shift; face stays towards the camera.
-   - **Hand Emphasis**: the arm is mostly out of the portrait frame; watch the shoulder/upper arm. Check for arm
-     clipping into the torso at 0.9 (rotate the avatar in the *Avatar* folder). The side is random; press several
-     times to see both.
+   - **Hand Emphasis**: the forearm is partly out of the default Waist frame; switch the *Camera* folder to Full
+     body, or watch the shoulder/upper arm. Check for arm clipping into the torso at 0.9 (rotate the avatar in the
+     *Avatar* folder). The side is random; press several times to see both.
    Adjust the sliders under *Amplitudes*, then *copy settings* and paste the JSON into the thread.
 2. Axis signs are the risky part on another VRM: if a hand swings backwards or inwards, flip the sign of
    `armForward` / `armOutward` / `elbowBend`.

@@ -16,7 +16,7 @@ test('extension loads: service worker starts and the content script injects on c
   await expect(other.locator('html')).not.toHaveAttribute('data-prosopon-content', 'ready');
 });
 
-test('enable shows the avatar; voice UI appearing/disappearing moves it and hides/restores the orb', async ({
+test('enable shows the avatar over the whole viewport; voice UI hides/restores the orb', async ({
   serviceWorker,
   chatgpt,
 }) => {
@@ -27,9 +27,15 @@ test('enable shows the avatar; voice UI appearing/disappearing moves it and hide
   const host = root(chatgpt);
   await expect(host).toHaveAttribute('data-avatar-loaded', 'true', { timeout: 30_000 });
   await expect(host).toHaveAttribute('data-offscreen', 'true');
-  await expect(host).toHaveAttribute('data-placement', 'fallback');
+  // The render surface is the whole viewport; where the avatar sits is the camera's lens shift (saved layout).
+  await expect(host).toHaveAttribute('data-placement', 'viewport');
+  await expect(host).toHaveAttribute('data-camera-preset', 'waist');
+  await expect(host).toHaveAttribute('data-avatar-scale', '1.50');
   await expect(host).toHaveAttribute('data-voice-ui', 'false');
   expect(await overlayCounts(chatgpt)).toEqual({ roots: 1, canvases: 1 });
+  const viewport = chatgpt.viewportSize()!;
+  const full = await host.boundingBox();
+  expect(full).toEqual({ x: 0, y: 0, width: viewport.width, height: viewport.height });
 
   // Overlay must not take clicks from ChatGPT.
   await expect(host).toHaveCSS('pointer-events', 'none');
@@ -37,25 +43,19 @@ test('enable shows the avatar; voice UI appearing/disappearing moves it and hide
 
   await chatgpt.evaluate(() => (window as any).fixture.openVoice());
   await expect(host).toHaveAttribute('data-voice-ui', 'true');
-  await expect(host).toHaveAttribute('data-placement', 'anchor');
+  await expect(host).toHaveAttribute('data-placement', 'viewport');
   await expect(host).toHaveAttribute('data-avatar-state', 'listening');
   const orb = chatgpt.locator('[data-realtime-voice-orb]');
   await expect(orb).toHaveCSS('visibility', 'hidden');
   await expect(orb).toBeAttached(); // hidden, never removed
 
-  // Overlay sits over the orb and inside the viewport.
-  const [orbBox, hostBox] = [await orb.boundingBox(), await host.boundingBox()];
-  expect(orbBox && hostBox).toBeTruthy();
-  const orbCenter = { x: orbBox!.x + orbBox!.width / 2, y: orbBox!.y + orbBox!.height / 2 };
-  expect(orbCenter.x).toBeGreaterThan(hostBox!.x);
-  expect(orbCenter.x).toBeLessThan(hostBox!.x + hostBox!.width);
-  expect(orbCenter.y).toBeGreaterThan(hostBox!.y);
-  expect(orbCenter.y).toBeLessThan(hostBox!.y + hostBox!.height);
+  // Opening voice mode doesn't move the avatar: placement is the user's, not the orb's.
+  expect(await host.boundingBox()).toEqual(full);
+  await expect(host).toHaveAttribute('data-placement-x', '0.500');
 
   // The page can still be used through the overlay.
   await chatgpt.locator('#close-voice').click();
   await expect(host).toHaveAttribute('data-voice-ui', 'false');
-  await expect(host).toHaveAttribute('data-placement', 'fallback');
   await expect(host).toHaveAttribute('data-avatar-state', 'idle');
 
   // Page CSS doesn't reach the canvas in the shadow root.

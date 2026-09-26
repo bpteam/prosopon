@@ -16,6 +16,8 @@ function fakeRuntime(): AvatarRuntimeHandle & { frames: unknown[]; disposed: num
     setEmotionStatus: vi.fn(),
     setOffscreenConnected: vi.fn(),
     setExtensionState: vi.fn(),
+    setPlacementMode: vi.fn(),
+    pushTelemetry: vi.fn(),
     dispose: () => void r.disposed++,
   };
   return r;

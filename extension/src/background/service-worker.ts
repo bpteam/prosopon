@@ -8,6 +8,7 @@ import {
   type MicStatus,
   isMicStatus,
   type EmotionModelInstallState,
+  type MicPreference,
 } from '../shared/messages';
 import { isChatGptUrl } from '../shared/urls';
 import { TabSessions, type CaptureBackend } from './TabSessions';
@@ -300,6 +301,20 @@ chrome.runtime.onMessage.addListener((raw, sender, sendResponse) => {
         const state = await emotionInstaller.setEnabled(msg.enabled);
         if (!msg.enabled) await deactivateEmotionModel();
         sendResponse(publicEmotionState(state.status === 'initializing' ? await initializeEmotionModel() : state));
+      });
+      return true;
+    case 'mic:preference':
+      void ready.then(async () => {
+        const enabled = await micWanted();
+        const status = (await hasOffscreen()) ? await toOffscreen({ type: 'mic:info' }).catch(() => null) : null;
+        sendResponse({ enabled, status: isMicStatus(status) ? { state: status.state, error: status.error } : null } satisfies MicPreference);
+      });
+      return true;
+    case 'mic:set-preference':
+      // Popup switch: the same path as the toolbar context menu (a user gesture, so a missing grant opens the page).
+      void ready.then(async () => {
+        const status = await setMicWanted(msg.enabled, true);
+        sendResponse({ enabled: msg.enabled, status } satisfies MicPreference);
       });
       return true;
     case 'extension:error':

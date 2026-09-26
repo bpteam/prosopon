@@ -79,12 +79,17 @@ test('assistant voice: calm vs energetic change the avatar; lip sync keeps worki
   await expect.poll(() => num(host, 'data-emotion-mix-assistant'), { timeout: 10_000 }).toBeLessThan(0.02);
 });
 
-test('debug switch turns assistant emotion expression off independently', async ({ serviceWorker, chatgpt }) => {
+test('Dev Tools switch turns assistant emotion expression off independently', async ({ serviceWorker, chatgpt }) => {
   const host = await enableWithVoiceUi(serviceWorker, chatgpt);
   await chatgpt.evaluate(() => (window as any).fixture.playVoice('energetic'));
   await expect.poll(() => num(host, 'data-emotion-mix-assistant'), { timeout: 10_000 }).toBeGreaterThan(0.2);
-  // The overlay's own checkbox (clickable, unlike the rest of the overlay).
-  const box = host.locator('#prosopon-assistant-emotion');
+  // The switch lives in Developer Tools → Emotion (Developer mode), not on the render overlay.
+  await serviceWorker.evaluate(() => chrome.storage.local.set({ 'prosopon.developerMode': true }));
+  const ui = chatgpt.locator('#prosopon-ui');
+  await expect(ui).toHaveAttribute('data-dev-tools', 'mounted');
+  await ui.locator('[data-testid="dev-window-hud"] [data-action="expand"]').click();
+  await ui.locator('[data-testid="dev-window-devtools"] [role="tab"][data-tab="Emotion"]').click();
+  const box = ui.locator('#prosopon-assistant-emotion');
   await expect(box).toBeChecked();
   await box.click();
   await expect(host).toHaveAttribute('data-assistant-emotion-enabled', 'false');

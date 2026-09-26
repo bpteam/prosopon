@@ -71,6 +71,11 @@ export class UserVoicePipeline {
     return this.graph !== null;
   }
 
+  /** The mic's AudioContext while running (developer telemetry reads its state and latency). */
+  get context(): AudioContext | null {
+    return this.graph?.ctx ?? null;
+  }
+
   get info(): MicInfo {
     const tracks = this.graph?.stream.getAudioTracks() ?? [];
     return {

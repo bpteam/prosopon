@@ -386,3 +386,53 @@ describe('avatar attached after construction (model still loading)', () => {
     expect(vrm.lookAt.target).not.toBeNull();
   });
 });
+
+describe('behaviour diagnostics snapshot', () => {
+  it('reports what the mixer actually composed, and reading it changes nothing', () => {
+    const run = (snapshot: boolean) => {
+      const { controller } = setup();
+      controller.setMouthSource({ update: () => ({ aa: 0.6, ih: 0.1, ou: 0, ee: 0, oh: 0 }) });
+      controller.setState('speaking');
+      const poses: number[] = [];
+      for (let i = 0; i < 40; i++) {
+        controller.update(1 / 60);
+        if (snapshot) {
+          const s = controller.getBehaviorSnapshot();
+          expect(s.state).toBe('speaking');
+          expect(s.pose).toEqual(controller.pose);
+          expect(s.pose).not.toBe(controller.pose);
+          expect(s.weights.mouth).toBeCloseTo(0.6);
+          expect(s.expressions.aa).toBeCloseTo(0.6);
+          expect(s.weights.assistantEmotion).toBe(controller.emotionMix.assistant);
+          expect(s.weights.idle).toBe(1);
+          // A mutated snapshot is a copy: the next frame is unaffected.
+          s.pose.headYaw = 99;
+          s.weights.mouth = -1;
+        }
+        poses.push(controller.pose.headYaw, controller.pose.aa);
+      }
+      return { poses, progress: controller.getBehaviorSnapshot().weights.state };
+    };
+    const withSnapshots = run(true);
+    expect(withSnapshots.poses).toEqual(run(false).poses);
+    expect(withSnapshots.progress).toBe(1);
+  });
+
+  it('state weight is the transition progress', () => {
+    const { controller } = setup();
+    controller.setState('listening');
+    controller.update(STATE_TRANSITION_DURATION / 2);
+    expect(controller.getBehaviorSnapshot().weights.state).toBeCloseTo(0.5);
+  });
+
+  it('resetPose returns manual bones to the rest pose, not the T-pose', () => {
+    const vrm = createFakeVrm();
+    const avatar = new Avatar(vrm, { logger: silentLogger(), restPose: { leftUpperArm: { x: 0, y: 0, z: -1.2 } } });
+    const controller = new AvatarController({ avatar, idle: makeIdle() });
+    controller.setBoneRotation('leftUpperArm', { z: 0.3 });
+    controller.setHeadRotation(0.2, 0.1, 0);
+    controller.resetPose();
+    expect(controller.getBoneRotation('leftUpperArm')).toEqual({ x: 0, y: 0, z: -1.2 });
+    expect(controller.getBoneRotation('head')).toEqual({ x: 0, y: 0, z: 0 });
+  });
+});
