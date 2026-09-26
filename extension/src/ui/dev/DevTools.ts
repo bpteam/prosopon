@@ -178,6 +178,18 @@ export class DevTools implements DevToolsHandle {
     this.saveWindow(id, { open: false }, 'now');
   }
 
+  /**
+   * A Developer Mode toggle starts a fresh diagnostics session. Restore its
+   * default windows so closing the HUD cannot permanently remove the only UI
+   * entry point to the developer tools. Page reloads do not call this method,
+   * so a close still survives a reload while Developer Mode remains on.
+   */
+  prepareNextSession(): void {
+    for (const id of ['hud', 'devtools', 'avatarControls'] as const) {
+      if (DEV_WINDOW_SPECS[id].openByDefault) this.saveWindow(id, { open: true }, 'now');
+    }
+  }
+
   /** Every window back to its initial geometry. */
   resetLayout(): void {
     const next: DevWindowsSettingsV1 = { ...this.bridge.windows.value, windows: {} };

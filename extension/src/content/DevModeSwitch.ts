@@ -40,6 +40,7 @@ export class DevModeSwitch {
       this.onValue = false;
       this.generation++;
       this.loading = false;
+      this.handleValue?.prepareNextSession();
       this.handleValue?.dispose();
       this.handleValue = null;
       if (was) this.hooks.onDisable?.();

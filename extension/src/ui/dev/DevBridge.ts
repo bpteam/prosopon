@@ -199,5 +199,11 @@ export interface DevToolsHandle {
   pushTelemetry(t: DevTelemetry): void;
   /** Placement mode changed (quick toolbar / Avatar Controls reflect it). */
   refresh(): void;
+  /**
+   * Prepares persisted window state for a new Developer Mode session. Closing a
+   * default window is temporary while the mode stays on, but it must not leave
+   * the next session without its entry point.
+   */
+  prepareNextSession(): void;
   dispose(): void;
 }

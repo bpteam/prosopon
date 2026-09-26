@@ -92,7 +92,9 @@ defaults; a window restored off-screen is pulled back so at least 24 px of its h
 
 `PersistedValue` debounces writes by 250 ms, flushes on pointer-up, `change`, window close and `pagehide`, applies
 other tabs' writes live and ignores the echo of its own. Mic opt-in stays in `storage.session`; model metadata is
-described under [Emotion model](#emotion-model).
+described under [Emotion model](#emotion-model). A close survives a page reload while Developer mode remains on;
+turning Developer mode off and back on starts a new diagnostics session and restores the default Debug HUD, so its
+Developer Tools entry point is always recoverable.
 
 ## Developer mode
 

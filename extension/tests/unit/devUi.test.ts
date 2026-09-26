@@ -247,10 +247,28 @@ describe('Developer Mode', () => {
     sw.set(true);
     sw.set(false);
     const dispose = vi.fn();
-    resolve(() => ({ frame() {}, pushTelemetry() {}, refresh() {}, dispose }));
+    resolve(() => ({ frame() {}, pushTelemetry() {}, refresh() {}, prepareNextSession() {}, dispose }));
     await new Promise((r) => setTimeout(r, 0));
     expect(sw.handle).toBeNull();
     expect(sw.mounts).toBe(0);
+  });
+
+  it('restores the default HUD after Developer Mode is toggled off and on', async () => {
+    const { bridge, layer } = fakeBridge(document);
+    const sw = new DevModeSwitch(async () => () => new DevTools(bridge));
+
+    sw.set(true);
+    await Promise.resolve();
+    await Promise.resolve();
+    (layer.shadow.querySelector('[data-testid="dev-window-hud"] [data-action="close"]') as HTMLButtonElement).click();
+    expect(layer.shadow.querySelector('[data-testid="dev-window-hud"]')).toBeNull();
+
+    sw.set(false);
+    sw.set(true);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(layer.shadow.querySelectorAll('[data-testid="dev-window-hud"]')).toHaveLength(1);
+    sw.set(false);
   });
 
   it('opens Developer Tools and Avatar Controls, persists their geometry and restores it', () => {

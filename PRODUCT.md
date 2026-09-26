@@ -333,6 +333,9 @@ Storage keys (`extension/src/shared/settings.ts`, each validated and clamped on 
 | emotion model metadata | local | see [extension/README.md](extension/README.md#emotion-model) |
 
 Writes are debounced (250 ms) and flushed on pointer-up, `change` and close; another tab's write is applied live.
+Closing a developer window survives a page reload while Developer mode stays on. Turning Developer mode off and back
+on begins a new diagnostics session and restores the default Debug HUD, so the Developer Tools entry point is never
+lost.
 
 Permissions: `tabCapture`, `offscreen`, `scripting` (re-inject into open tabs after install/update), `contextMenus`
 (mic opt-in), `storage` (mic opt-in in `session`; model metadata, layout and Developer Mode in `local`); hosts `https://chatgpt.com/*`,
