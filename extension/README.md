@@ -108,7 +108,9 @@ scene helpers. Available in production builds too (it is a user setting, not a d
   expand (→ Developer Tools), pin (a pinned HUD ignores Escape), close.
 - **Developer Tools** (900 × 620 centred; min 680 × 420; drag by the header, resize right/bottom/corner): Overview,
   Audio, Emotion (per-channel switches), Behavior, Gestures (real `GestureEngine` types, Auto / Enabled / Cancel,
-  manual triggers), Avatar, Settings (turn Developer mode off, reset window layout, storage keys).
+  manual triggers), Semantic (on/off, *Follow speech*, *Chance ×*; counters and pacer state; the last segments with
+  their matches — marker, locale, tier, confidence — the aggregated cues and the decision: gesture or skip reason),
+  Avatar, Settings (turn Developer mode off, reset window layout, storage keys).
 - **Avatar Controls** (460 × 620, right 20, top 100): Camera (presets, distance, target height, yaw, pitch, size,
   *Move avatar*, reset), Expressions (explicit preview that fades both emotion channels; `n/a` when the model lacks
   one), Poses (offsets over the rest pose, *Reset pose*), Gestures, Scene (transparent background; grid, skeleton,
@@ -143,6 +145,7 @@ content script ◄──────────── runtime Port (LIPSYNC_POR
   AvatarOverlay (full-viewport shadow root) · UiLayer (in-page UI, on demand) · ChatGPTAdapter
   ConversationSignalResolver ← voice UI + LipSyncFrame.active + UserVoiceFrame.speaking → AvatarController.setState
   AvatarController ← FrameMouthSource (assistant only) + UserReactionMapper + EmotionChannels + GestureEngine
+  ChatGPTAdapter.readLatestReply → SemanticFeed (SemanticAnalyzer → SemanticPacer) → GestureEngine.pushSemantic
 ```
 
 | Context | Owns | Never |
@@ -186,6 +189,14 @@ The service worker, offscreen, content, worklet, `ui/` and `popup/` boundaries a
   [../avatar/README.md](../avatar/README.md#user-voice-contracts)); samples never leave the render thread, only
   frames do. The worklet node has zero outputs: every edge of the mic graph is checked in `UserVoicePipeline.link()`.
   Reactions are muted while the assistant speaks (the mic may be hearing it). The mouth never follows the user.
+- **Semantic layer.** `ChatGPTAdapter.observeReplies` only marks the reply dirty; the render loop's
+  `SemanticFeed.update(delta, voiceUiActive, assistantSpeaking)` reads `readLatestReply()` (latest
+  `[data-message-author-role="assistant"]`, its `.markdown` body rendered to light Markdown: `1.`/`-` items, `#`
+  headings, `**bold**`, code blocks emptied, buttons/tables/hidden nodes skipped) at most every 125 ms after a
+  mutation. The reply present at activation is ignored; a reply unchanged for 2.5 s is complete. With the voice UI
+  open, `SemanticPacer` releases intents at the estimated spoken position (assistant audio time × 14 chars/s);
+  otherwise at once. An exception switches the feed off; the avatar continues. Analysis and decisions:
+  [../avatar/README.md](../avatar/README.md#semantic-analyzer).
 - **Prosody & emotion.** Both channels use one `ProsodyEmotionAnalyzer` each (`ProsodyChannel`: the assistant's is
   tapped off the tab capture, one per tab; the user's off the mic pipeline). The content script feeds the frames
   into `EmotionChannels` → `BehaviorMixer`, weighted by conversation state (speaking 1/0, listening 0.15/1, so an
@@ -269,9 +280,14 @@ IndexedDB. The `PROSOPON_EMBED_MODEL=1 …` script syntax needs a POSIX shell (u
 - `window.__PROSOPON_DEBUG__` lives in the content script's isolated world: pick the Prosopon context in the
   DevTools console's context selector.
 - Page-console events: `prosopon:debug` (e.g. `{ emotionConfig: { baselineWeight: 0.3 } }`) and `prosopon:gesture`
-  (`trigger`, `cancel`, `auto`, `seed`, `config`), `prosopon:emotion` (`{channel, enabled}`).
+  (`trigger`, `cancel`, `auto`, `seed`, `config`), `prosopon:emotion` (`{channel, enabled}`), `prosopon:semantic`
+  (`{enabled, pacing, probabilityScale}`).
+- Semantic attributes on the overlay host: `data-semantic-enabled`, `data-semantic-mode` (`speech` / `immediate` /
+  `off`), `data-semantic-cues`, `data-semantic-intents`, `data-semantic-accepted`, `data-semantic-last` (cue types of
+  the last intent). `__PROSOPON_DEBUG__.semantic` is the `SemanticFeed`.
 - Calibration procedures: [../docs/emotion-calibration.md](../docs/emotion-calibration.md) (prosody/emotion),
-  [../docs/gesture-calibration.md](../docs/gesture-calibration.md) (gestures).
+  [../docs/gesture-calibration.md](../docs/gesture-calibration.md) (gestures),
+  [../docs/semantic-calibration.md](../docs/semantic-calibration.md) (reply text, timing, semantic accents).
 
 ## Known limitations
 
@@ -303,13 +319,17 @@ IndexedDB. The `PROSOPON_EMBED_MODEL=1 …` script syntax needs a POSIX shell (u
   how they sit over the real composer and sidebar is a manual check. The layout is one for all tabs and sizes.
 - **Move avatar from the popup** needs the popup to close first (it does), so the handle appears on the page with
   focus; if the active tab isn't an enabled ChatGPT tab, nothing happens.
+- **Semantic layer.** The assistant-message selector and the reply text in voice mode are unverified on production
+  (fixture only); if ChatGPT doesn't render the reply while it speaks, semantic accents are silent in voice mode.
+  Timing is a fixed-rate estimate, not alignment. See [../docs/semantic-calibration.md](../docs/semantic-calibration.md).
 - **VRM expression overrides.** Presets with `overrideMouth: blend` are pre-compensated; a model whose emotion
   presets `block` the mouth gets no procedural emotion on them (warned once).
 
 ## Tests
 
 ```bash
-npm test          # unit: protocol, manifest, TabSessions/ContentLifecycle idempotency, ChatGPTAdapter (DOM fixtures),
+npm test          # unit: protocol, manifest, TabSessions/ContentLifecycle idempotency, ChatGPTAdapter (DOM fixtures,
+                  # reply text), SemanticFeed (baseline, streaming, pacing, fail-soft),
                   # ConversationSignalResolver, UserVoicePipeline (fake Web Audio graph), architecture rules,
                   # settings (schema, roundtrip, debounce, clamp), ring buffer, Dev UI (happy-dom: windows, Dev Mode
                   # switch, toolbar, placement handle, ManualControls)
@@ -330,6 +350,8 @@ Playwright's default `--mute-audio` is removed so the captured audio isn't silen
 - `dev-mode.spec.ts`: popup → storage → page; the Developer mode flow (HUD once, Developer Tools, Avatar Controls,
   presets, size, keyboard placement, Escape, window drag + persistence, reload restores, off removes everything,
   avatar keeps running).
+- `semantic.spec.ts`: a reply streamed into the fixture (`fixture.streamReply`) → cues and intents on the overlay
+  host; the reply present at activation is ignored; `prosopon:semantic` off stops analysis.
 - `emotion.spec.ts`: assistant and user channels through to the mixer, interruption priority swap, the Dev Tools
   emotion switch;
   local-model tests on WASM, WebGPU (SwiftShader: `--enable-unsafe-webgpu --use-webgpu-adapter=swiftshader`) and a

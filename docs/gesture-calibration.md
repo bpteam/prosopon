@@ -24,6 +24,8 @@ looking at the model. Budget: ~20 minutes.
 3. Turn **Auto** on, play a recorded ChatGPT answer (Lip Sync → *play audio file…*, Emotion → *audio source is:
    assistant*). Expect a gesture every ~10–30 s on lively speech, almost none on calm speech. `rate ×` scales all
    rates for tuning (1 = shipped).
+4. **Head Shake** and **Lean In** never start on their own (rate 0); they come from semantic cues. Press them here
+   to judge amplitude; their frequency is tuned in [semantic-calibration.md](semantic-calibration.md).
 
 ## Extension (real conversation)
 
