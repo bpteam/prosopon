@@ -7,10 +7,13 @@ import { BehaviorMixer, type EmotionMixConfig, type EmotionMixState } from './Be
 import { NEUTRAL_EMOTION_INPUTS, type EmotionInputs, type EmotionSource } from './EmotionExpression';
 import { ConversationStateMachine, type ConversationStateMachineOptions } from './ConversationStateMachine';
 import { NEUTRAL_REACTION, type ReactionSource } from './UserReaction';
+import { NEUTRAL_GESTURE, type GestureContext, type GestureFrame, type GestureSource } from './gesture/Gesture';
+import { NEUTRAL_EMOTION } from '../audio/emotion/EmotionFrame';
 
 export type { MouthSource } from './MouthShape';
 export type { ReactionSource } from './UserReaction';
 export type { EmotionSource } from './EmotionExpression';
+export type { GestureSource } from './gesture/Gesture';
 
 export type StateChangeListener = (state: AvatarState, previous: AvatarState) => void;
 
@@ -26,6 +29,7 @@ export interface AvatarControllerApi {
   setMouthSource(source: MouthSource | null): void;
   setReactionSource(source: ReactionSource | null): void;
   setEmotionSource(source: EmotionSource | null): void;
+  setGestureSource(source: GestureSource | null): void;
 
   update(deltaTime: number): void;
 }
@@ -46,7 +50,8 @@ export interface AvatarControllerOptions extends ConversationStateMachineOptions
  * Public API of the avatar subsystem. External providers (conversation adapter, audio, emotion, tracking)
  * talk to this class; they know nothing about three-vrm, bones or the idle animation.
  *
- * Owns procedural composition: idle pose → conversation-state profile → Avatar.setProcedural().
+ * Owns procedural composition: idle, state profile, lip sync, reaction, emotion, gestures → BehaviorMixer →
+ * Avatar.setProcedural().
  * Manual controls (expressions, bone/head rotation) are proxied to Avatar's manual layer, which Avatar
  * composes with the procedural layer, so neither overwrites the other.
  */
@@ -64,6 +69,20 @@ export class AvatarController implements AvatarControllerApi {
   private reactionSource: ReactionSource | null = null;
   private emotionSource: EmotionSource | null = null;
   private lastEmotion: Readonly<EmotionInputs> = NEUTRAL_EMOTION_INPUTS;
+  private gestureSource: GestureSource | null = null;
+  private lastGesture: Readonly<GestureFrame> = NEUTRAL_GESTURE;
+  /** Reused every frame: no allocation in update(). */
+  private readonly gestureContext: GestureContext = {
+    conversationState: 'idle',
+    userSpeaking: false,
+    assistantSpeaking: false,
+    userEmotion: NEUTRAL_EMOTION,
+    assistantEmotion: NEUTRAL_EMOTION,
+    utteranceEnds: 0,
+    lastUtteranceDuration: 0,
+  };
+  /** Utterance boundaries from the user emotion channel, used when there is no reaction source (sandbox). */
+  private fallbackUtterance = { active: false, duration: 0, ends: 0, last: 0 };
 
   constructor(options: AvatarControllerOptions) {
     this.idle = options.idle ?? new AvatarIdleController();
@@ -208,6 +227,23 @@ export class AvatarController implements AvatarControllerApi {
     return this.lastEmotion;
   }
 
+  // --- Gestures ------------------------------------------------------------
+
+  /**
+   * Source of gestures (nods, tilts, body/shoulder shifts, hand emphasis). Sees conversation state, both voices'
+   * emotion and user utterance boundaries; its GestureFrame goes through BehaviorMixer like every other source, it
+   * never touches the avatar. Replacing it cancels nothing on the old one: reset() it yourself if you keep it.
+   */
+  setGestureSource(source: GestureSource | null): void {
+    this.gestureSource = source;
+    if (!source) this.lastGesture = NEUTRAL_GESTURE;
+  }
+
+  /** Gesture output of the last frame (diagnostics). */
+  get gesture(): Readonly<GestureFrame> {
+    return this.lastGesture;
+  }
+
   /** Composed procedural pose of the last frame, also without an avatar (diagnostics, tests). */
   get pose(): Readonly<ProceduralPose> {
     return this.mixer.pose;
@@ -222,7 +258,37 @@ export class AvatarController implements AvatarControllerApi {
     const reaction = this.reactionSource?.update(deltaTime) ?? NEUTRAL_REACTION;
     const emotion = this.emotionSource?.update(deltaTime) ?? NEUTRAL_EMOTION_INPUTS;
     this.lastEmotion = emotion;
-    const pose = this.mixer.compose(idlePose, profile, mouth, reaction, emotion);
+    let gesture: Readonly<GestureFrame> = NEUTRAL_GESTURE;
+    if (this.gestureSource) {
+      const ctx = this.gestureContext;
+      const state = this.machine.getState();
+      ctx.conversationState = state;
+      // The reaction source knows about echo (suppressed while the assistant talks); without one, the user channel's
+      // voice activity is all there is.
+      ctx.assistantSpeaking = state === 'speaking';
+      ctx.userEmotion = emotion.user;
+      ctx.assistantEmotion = emotion.assistant;
+      if (this.reactionSource) {
+        ctx.userSpeaking = reaction.speaking;
+        ctx.utteranceEnds = reaction.utteranceEnds;
+        ctx.lastUtteranceDuration = reaction.lastUtteranceDuration;
+      } else {
+        const u = this.fallbackUtterance;
+        const active = emotion.user.active && state !== 'speaking';
+        if (active) u.duration = u.active ? u.duration + Math.max(0, deltaTime || 0) : 0;
+        else if (u.active) {
+          u.ends++;
+          u.last = u.duration;
+        }
+        u.active = active;
+        ctx.userSpeaking = active;
+        ctx.utteranceEnds = u.ends;
+        ctx.lastUtteranceDuration = u.last;
+      }
+      gesture = this.gestureSource.update(deltaTime, ctx);
+    }
+    this.lastGesture = gesture;
+    const pose = this.mixer.compose(idlePose, profile, mouth, reaction, emotion, gesture);
     if (!this.current) return;
     this.current.setProcedural(pose);
     this.current.update(deltaTime);

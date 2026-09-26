@@ -1,4 +1,5 @@
 import type { ProceduralPose } from './Avatar';
+import { NEUTRAL_BODY_POSE } from './BodyPose';
 import { NO_EMOTION_EXPRESSIONS } from './EmotionExpression';
 
 export interface IdleConfig {
@@ -135,6 +136,8 @@ export class AvatarIdleController {
       oh: 0,
       // Idle has no opinion about emotion: the mixer takes these from the emotion layer.
       ...NO_EMOTION_EXPRESSIONS,
+      // Nor about gestures: body/shoulder/arm offsets come from the gesture layer only.
+      ...NEUTRAL_BODY_POSE,
       gazePhase: 'center',
     };
   }

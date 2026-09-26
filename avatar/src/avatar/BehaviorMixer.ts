@@ -2,6 +2,9 @@ import { EMPTY_PROCEDURAL_POSE, type MouthShape, type ProceduralPose } from './A
 import type { AvatarStateProfile } from './AvatarStateProfiles';
 import { EMOTION_EXPRESSIONS, NEUTRAL_EMOTION_INPUTS, type EmotionExpressions, type EmotionInputs } from './EmotionExpression';
 import { NEUTRAL_REACTION, REACTION_LIMITS, type UserReactionFrame } from './UserReaction';
+import { POSE_LIMITS } from './BodyPose';
+import { NEUTRAL_GESTURE, type GestureFrame } from './gesture/Gesture';
+import { GESTURE_LIMITS } from './gesture/GestureConfig';
 
 /**
  * How far the emotion layer may move the avatar. Everything is subtle on purpose: full-scale values of every input
@@ -76,12 +79,13 @@ export interface EmotionMixState {
  * The single place where behaviour sources are merged into the one ProceduralPose that Avatar receives.
  *
  * Sources: idle (base signal), conversation state (scales and biases it), mouth (lip sync), the user reaction
- * (small, bounded modulation from the user's voice, including the nod) and emotion (assistant self-expression and
- * the user reaction layer, weighted per conversation state). New sources are added here as further inputs of
- * compose(), never as additional writers of Avatar.setProcedural().
+ * (small, bounded modulation from the user's voice), emotion (assistant self-expression and the user reaction
+ * layer, weighted per conversation state) and gestures (transient head/body/shoulder/arm offsets, US-008). New
+ * sources are added here as further inputs of compose(), never as additional writers of Avatar.setProcedural().
  *
  * Ownership: the mouth visemes come from `mouth` only; emotion writes happy/relaxed/sad/angry/surprised, head/gaze
- * motion and posture, never a viseme.
+ * motion and posture, never a viseme; gestures write head/body/shoulder/arm offsets only (no expression, no blink,
+ * no gaze). Each gesture channel is clamped to GESTURE_LIMITS, then the summed procedural pose to POSE_LIMITS.
  */
 export class BehaviorMixer {
   readonly emotionConfig: EmotionMixConfig;
@@ -106,6 +110,7 @@ export class BehaviorMixer {
    * @param mouth lip sync output: openness on "aa", or a weight per viseme preset
    * @param reaction user reaction; clamped here, so no source can exceed REACTION_LIMITS
    * @param emotion both voice channels' emotion; clamped here, so no source can exceed the EmotionMixConfig bounds
+   * @param gesture the primary gesture's offsets; clamped here to GESTURE_LIMITS
    */
   compose(
     idle: Readonly<ProceduralPose>,
@@ -113,12 +118,12 @@ export class BehaviorMixer {
     mouth: number | Readonly<MouthShape> = 0,
     reaction: Readonly<UserReactionFrame> = NEUTRAL_REACTION,
     emotion: Readonly<EmotionInputs> = NEUTRAL_EMOTION_INPUTS,
+    gesture: Readonly<GestureFrame> = NEUTRAL_GESTURE,
   ): Readonly<ProceduralPose> {
     const o = this.out;
     const c = this.emotionConfig;
     const engagement = clamp(reaction.engagement, 0, 1);
     const lift = clamp(reaction.pitchLift, 0, 1);
-    const nod = clamp(reaction.nod, 0, 1);
 
     // Emotion weights: conversation state decides whose voice counts (priority rules), the debug switches can turn
     // either off, and confidence scales both, so an unsure analyser leaves the avatar near neutral.
@@ -148,11 +153,17 @@ export class BehaviorMixer {
       (1 - c.userGazeFocus * Math.max(Math.max(0, uArousal), uTension) * eu);
 
     const head = state.headMotionMultiplier * (1 + REACTION_LIMITS.headMotionGain * engagement) * emotionHead;
-    o.headYaw = idle.headYaw * head + state.headYawOffset;
-    // Pitch > 0 is chin down: the nod dips, a raised voice lifts the chin a touch.
-    o.headPitch =
-      idle.headPitch * head + state.headPitchOffset + REACTION_LIMITS.nod * nod - REACTION_LIMITS.pitchLift * lift;
-    o.headRoll = idle.headRoll * head + state.headRollOffset;
+    const L = GESTURE_LIMITS;
+    const P = POSE_LIMITS;
+    const gh = gesture.head;
+    const gb = gesture.body;
+    o.headYaw = sym(idle.headYaw * head + state.headYawOffset + sym(gh.yaw, L.headYaw), P.headYaw);
+    // Pitch > 0 is chin down: a nod (gesture) dips, a raised voice lifts the chin a touch.
+    o.headPitch = sym(
+      idle.headPitch * head + state.headPitchOffset - REACTION_LIMITS.pitchLift * lift + sym(gh.pitch, L.headPitch),
+      P.headPitch,
+    );
+    o.headRoll = sym(idle.headRoll * head + state.headRollOffset + sym(gh.roll, L.headRoll), P.headRoll);
 
     o.breath = idle.breath * state.breathingMultiplier * (1 + c.assistantBodyMotion * aArousal * ea);
     o.lean =
@@ -161,6 +172,27 @@ export class BehaviorMixer {
       REACTION_LIMITS.lean * engagement +
       c.assistantLean * Math.max(0, aArousal) * ea +
       c.userLean * Math.max(0, uArousal) * eu;
+    o.lean = sym(o.lean + sym(gb.lean, L.bodyLean), P.lean);
+
+    // Body, shoulders, arms: gestures only (idle breathes through `breath`, handled by Avatar).
+    o.bodyYaw = sym(sym(gb.yaw, L.bodyYaw), P.bodyYaw);
+    o.bodyRoll = sym(sym(gb.roll, L.bodyRoll), P.bodyRoll);
+    o.shoulderLeft = sym(sym(gesture.shoulders.left, L.shoulder), P.shoulder);
+    o.shoulderRight = sym(sym(gesture.shoulders.right, L.shoulder), P.shoulder);
+    const arms = gesture.arms;
+    const arm = Math.min(L.arm, P.arm);
+    o.leftUpperArmX = sym(arms.leftUpperArm.x, arm);
+    o.leftUpperArmY = sym(arms.leftUpperArm.y, arm);
+    o.leftUpperArmZ = sym(arms.leftUpperArm.z, arm);
+    o.leftLowerArmX = sym(arms.leftLowerArm.x, arm);
+    o.leftLowerArmY = sym(arms.leftLowerArm.y, arm);
+    o.leftLowerArmZ = sym(arms.leftLowerArm.z, arm);
+    o.rightUpperArmX = sym(arms.rightUpperArm.x, arm);
+    o.rightUpperArmY = sym(arms.rightUpperArm.y, arm);
+    o.rightUpperArmZ = sym(arms.rightUpperArm.z, arm);
+    o.rightLowerArmX = sym(arms.rightLowerArm.x, arm);
+    o.rightLowerArmY = sym(arms.rightLowerArm.y, arm);
+    o.rightLowerArmZ = sym(arms.rightLowerArm.z, arm);
 
     // Blink is owned by idle; state never modulates it, so a state switch cannot interrupt a blink.
     o.blink = idle.blink;
@@ -222,6 +254,11 @@ export class BehaviorMixer {
       for (const e of EMOTION_EXPRESSIONS) o[e] *= k;
     }
   }
+}
+
+/** Clamp to [−limit, limit]; NaN/±Infinity → 0. */
+function sym(v: number, limit: number): number {
+  return Number.isFinite(v) ? (v < -limit ? -limit : v > limit ? limit : v) : 0;
 }
 
 function clamp(v: number, min: number, max: number): number {

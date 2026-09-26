@@ -1,3 +1,4 @@
+import { NEUTRAL_BODY_POSE } from '../../src/avatar/BodyPose';
 import { NO_EMOTION_EXPRESSIONS } from '../../src/avatar/EmotionExpression';
 import { describe, expect, it } from 'vitest';
 import { SILENT_USER_VOICE_FRAME, type UserVoiceFrame } from '../../src/audio/user/UserVoiceFrame';
@@ -8,6 +9,8 @@ import { STATE_PROFILES } from '../../src/avatar/AvatarStateProfiles';
 import { BehaviorMixer } from '../../src/avatar/BehaviorMixer';
 import { NEUTRAL_REACTION, REACTION_LIMITS } from '../../src/avatar/UserReaction';
 import { UserReactionMapper } from '../../src/avatar/UserReactionMapper';
+import { GestureEngine } from '../../src/avatar/gesture/GestureEngine';
+import { seededRandom } from '../../src/avatar/gesture/Gesture';
 import { createFakeVrm, silentLogger } from './fakeVrm';
 
 const FPS = 1 / 60;
@@ -15,7 +18,7 @@ const voice = (over: Partial<UserVoiceFrame>): UserVoiceFrame => ({ ...SILENT_US
 
 /** Pushes `frame` at 25 Hz while updating at 60 Hz for `seconds`; returns the max of each output. */
 function drive(m: UserReactionMapper, frame: UserVoiceFrame, seconds: number) {
-  const max = { engagement: 0, pitchLift: 0, nod: 0 };
+  const max = { engagement: 0, pitchLift: 0 };
   let sincePush = Infinity;
   for (let t = 0; t < seconds; t += FPS) {
     sincePush += FPS;
@@ -26,7 +29,6 @@ function drive(m: UserReactionMapper, frame: UserVoiceFrame, seconds: number) {
     const v = m.update(FPS);
     max.engagement = Math.max(max.engagement, v.engagement);
     max.pitchLift = Math.max(max.pitchLift, v.pitchLift);
-    max.nod = Math.max(max.nod, v.nod);
   }
   return max;
 }
@@ -34,7 +36,9 @@ function drive(m: UserReactionMapper, frame: UserVoiceFrame, seconds: number) {
 describe('UserReactionMapper', () => {
   it('silence: neutral', () => {
     const m = new UserReactionMapper();
-    expect(drive(m, SILENT_USER_VOICE_FRAME, 2)).toEqual({ engagement: 0, pitchLift: 0, nod: 0 });
+    expect(drive(m, SILENT_USER_VOICE_FRAME, 2)).toEqual({ engagement: 0, pitchLift: 0 });
+    expect(m.value.speaking).toBe(false);
+    expect(m.value.utteranceEnds).toBe(0);
   });
 
   it('speech raises engagement slowly and within [0, 1]; energy only modulates it', () => {
@@ -54,33 +58,29 @@ describe('UserReactionMapper', () => {
     expect(lowVoiceHighHz.pitchLift).toBe(0);
   });
 
-  it('nods once at the end of a meaningful utterance, respecting the cooldown', () => {
+  it('reports every utterance end with its length; owns no nod', () => {
     const m = new UserReactionMapper();
     drive(m, voice({ speaking: true, segmentDuration: 1 }), 1);
-    expect(drive(m, voice({ speaking: false, segmentDuration: 1 }), 0.6).nod).toBeGreaterThan(0.9);
-    expect(m.nods).toBe(1);
-    expect(m.value.nod).toBe(0);
-    // Another phrase right away: inside the cooldown, no second nod.
-    drive(m, voice({ speaking: true, segmentDuration: 0.6 }), 0.6);
-    drive(m, voice({ speaking: false, segmentDuration: 0.6 }), 0.3);
-    expect(m.nods).toBe(1);
-    // After the cooldown it nods again.
-    drive(m, voice({ speaking: false }), 2);
-    drive(m, voice({ speaking: true, segmentDuration: 0.8 }), 0.8);
-    drive(m, voice({ speaking: false, segmentDuration: 0.8 }), 0.6);
-    expect(m.nods).toBe(2);
+    expect(m.value.speaking).toBe(true);
+    drive(m, voice({ speaking: false, segmentDuration: 1.2 }), 0.3);
+    expect(m.value).toMatchObject({ speaking: false, utteranceEnds: 1, lastUtteranceDuration: 1.2 });
+    // A short one is reported too: GestureEngine decides what deserves a nod.
+    drive(m, voice({ speaking: true, segmentDuration: 0.2 }), 0.2);
+    drive(m, voice({ speaking: false, segmentDuration: 0.2 }), 0.2);
+    expect(m.value).toMatchObject({ utteranceEnds: 2, lastUtteranceDuration: 0.2 });
+    expect('nod' in m.value).toBe(false);
+    // reset() keeps the counter monotonic.
+    m.reset();
+    expect(m.value.utteranceEnds).toBe(2);
   });
 
-  it('no nod after a short segment or while suppressed (assistant talking)', () => {
-    const m = new UserReactionMapper();
-    drive(m, voice({ speaking: true, segmentDuration: 0.3 }), 0.3);
-    drive(m, voice({ speaking: false, segmentDuration: 0.3 }), 1);
-    expect(m.nods).toBe(0);
+  it('while suppressed (assistant talking): no engagement, not speaking, no utterance boundary', () => {
     const s = new UserReactionMapper();
     s.setSuppressed(true);
     expect(drive(s, voice({ speaking: true, segmentDuration: 1, energy: 1 }), 1).engagement).toBe(0);
+    expect(s.value.speaking).toBe(false);
     drive(s, voice({ speaking: false, segmentDuration: 1 }), 1);
-    expect(s.nods).toBe(0);
+    expect(s.value.utteranceEnds).toBe(0);
   });
 
   it('stale frames decay to neutral', () => {
@@ -92,7 +92,7 @@ describe('UserReactionMapper', () => {
 });
 
 describe('BehaviorMixer reaction input', () => {
-  const idlePose = { ...NO_EMOTION_EXPRESSIONS, headYaw: 0.02, headPitch: 0.01, headRoll: -0.01, breath: 0.5, lean: 0, blink: 0, gazeYaw: 4, gazePitch: 2, aa: 0, ih: 0, ou: 0, ee: 0, oh: 0 };
+  const idlePose = { ...NO_EMOTION_EXPRESSIONS, ...NEUTRAL_BODY_POSE, headYaw: 0.02, headPitch: 0.01, headRoll: -0.01, breath: 0.5, lean: 0, blink: 0, gazeYaw: 4, gazePitch: 2, aa: 0, ih: 0, ou: 0, ee: 0, oh: 0 };
 
   it('neutral reaction is the identity', () => {
     const mixer = new BehaviorMixer();
@@ -104,33 +104,39 @@ describe('BehaviorMixer reaction input', () => {
   it('is bounded whatever the source asks for, and never touches the mouth', () => {
     const mixer = new BehaviorMixer();
     const base = { ...mixer.compose(idlePose, STATE_PROFILES.listening, 0) };
-    const out = { ...mixer.compose(idlePose, STATE_PROFILES.listening, 0, { engagement: 50, pitchLift: 50, nod: 50 }) };
-    expect(out.headPitch - base.headPitch).toBeLessThanOrEqual(REACTION_LIMITS.nod + 1e-9);
+    const out = { ...mixer.compose(idlePose, STATE_PROFILES.listening, 0, { ...NEUTRAL_REACTION, engagement: 50, pitchLift: 50 }) };
+    expect(base.headPitch - out.headPitch).toBeCloseTo(REACTION_LIMITS.pitchLift);
     expect(out.lean - base.lean).toBeCloseTo(REACTION_LIMITS.lean);
     expect(Math.abs(out.headYaw / base.headYaw - 1)).toBeLessThanOrEqual(REACTION_LIMITS.headMotionGain + 1e-9);
     expect([out.aa, out.ih, out.ou, out.ee, out.oh]).toEqual([0, 0, 0, 0, 0]);
-    const nan = { ...mixer.compose(idlePose, STATE_PROFILES.listening, 0, { engagement: NaN, pitchLift: NaN, nod: NaN }) };
+    const nan = { ...mixer.compose(idlePose, STATE_PROFILES.listening, 0, { ...NEUTRAL_REACTION, engagement: NaN, pitchLift: NaN }) };
     expect(nan).toEqual(base);
   });
 });
 
 describe('AvatarController reaction source', () => {
-  it('nod reaches the head through the mixer only, and the state is unchanged', () => {
+  it('utterance ends reach the gesture source; the nod reaches the head through the mixer only', () => {
     const avatar = new Avatar(createFakeVrm(), { logger: silentLogger() });
     const idle = new AvatarIdleController({ config: { enabled: false, blinkEnabled: false } });
     const controller = new AvatarController({ avatar, idle, transitionDuration: 0 });
     controller.setState('listening');
-    const poses: number[] = [];
-    const setProcedural = avatar.setProcedural.bind(avatar);
-    avatar.setProcedural = (pose) => {
-      poses.push(pose.headPitch ?? 0);
-      setProcedural(pose);
-    };
+    const reaction = new UserReactionMapper();
+    controller.setReactionSource(reaction);
+    const gestures = new GestureEngine({ random: seededRandom(1), config: { nodOnUtteranceChance: 1, rateScale: 0 } });
+    controller.setGestureSource(gestures);
     for (let i = 0; i < 60; i++) controller.update(FPS);
-    const before = poses.at(-1)!;
-    controller.setReactionSource({ update: () => ({ engagement: 0, pitchLift: 0, nod: 1 }) });
+    const before = controller.pose.headPitch;
+    reaction.push(voice({ speaking: true, segmentDuration: 1 }));
     controller.update(FPS);
-    expect(poses.at(-1)! - before).toBeCloseTo(REACTION_LIMITS.nod, 4);
+    reaction.push(voice({ speaking: false, segmentDuration: 1 }));
+    let peak = 0;
+    for (let i = 0; i < 60; i++) {
+      controller.update(FPS);
+      peak = Math.max(peak, controller.pose.headPitch - before);
+    }
+    expect(gestures.nods).toBe(1);
+    expect(peak).toBeGreaterThan(0.02);
+    expect(controller.pose.headPitch).toBeCloseTo(before, 9);
     expect(controller.getState()).toBe('listening');
   });
 });

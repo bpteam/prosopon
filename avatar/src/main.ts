@@ -18,6 +18,9 @@ import { MAX_FRAME_DELTA, MODEL_URL, REST_POSE } from './config';
 import { DebugOverlay } from './debug/DebugOverlay';
 import { EmotionDebugPanel } from './debug/EmotionDebugPanel';
 import { EmotionChannels } from './avatar/EmotionChannels';
+import { GestureEngine } from './avatar/gesture/GestureEngine';
+import { mathRandom, seededRandom, type GestureFrame, type GestureType } from './avatar/gesture/Gesture';
+import { GestureDebugPanel } from './debug/GestureDebugPanel';
 import featureWorkletUrl from './audio/user/UserVoiceWorklet.ts?worker&url';
 import { AvatarStage } from './renderer/AvatarStage';
 import { RenderLoop } from './renderer/RenderLoop';
@@ -36,8 +39,23 @@ export interface AvatarDebugApi {
   analyzers: VisemeAnalyzerHost;
   emotion: EmotionChannels;
   emotionPanel: EmotionDebugPanel | null;
+  gesture: GestureDebugApi;
   /** Live getter: current conversation state (also before the avatar is loaded). */
   readonly state: AvatarState;
+}
+
+/** window.__AVATAR_DEBUG__.gesture: visual tuning and E2E. */
+export interface GestureDebugApi {
+  readonly engine: GestureEngine;
+  /** Output of the last frame. */
+  readonly current: Readonly<GestureFrame>;
+  /** Forced gesture: ignores probability and cooldown, never the safety bounds. */
+  trigger(type: GestureType, intensity?: number): boolean;
+  cancel(): void;
+  enabled: boolean;
+  auto: boolean;
+  /** Deterministic scheduling from now on (null: back to Math.random). */
+  seed(seed: number | null): void;
 }
 
 declare global {
@@ -73,6 +91,10 @@ controller.setMouthSource(visemes);
 // Emotion: fed by the Emotion / Prosody panel (file or mic → feature worklet → ProsodyEmotionAnalyzer).
 const emotion = new EmotionChannels();
 controller.setEmotionSource(emotion);
+// Gestures: `?gestureSeed=N` makes the scheduler deterministic (E2E, reproducing a sequence).
+const gestures = new GestureEngine({ random: seedFromUrl() ?? mathRandom });
+controller.setGestureSource(gestures);
+overlay.setGestureProvider(() => gestures.current);
 document.body.dataset.avatarState = controller.getState();
 controller.onStateChange((state) => (document.body.dataset.avatarState = state));
 
@@ -80,6 +102,7 @@ let panel: AvatarDebugPanel | null = null;
 let lipSyncPanel: LipSyncDebugPanel | null = null;
 let visemePanel: VisemeDebugPanel | null = null;
 let emotionPanel: EmotionDebugPanel | null = null;
+let gesturePanel: GestureDebugPanel | null = null;
 let errorBanner: HTMLElement | null = null;
 
 const debugApi: AvatarDebugApi = {
@@ -96,6 +119,27 @@ const debugApi: AvatarDebugApi = {
   analyzers,
   emotion,
   emotionPanel: null,
+  gesture: {
+    engine: gestures,
+    get current() {
+      return gestures.current;
+    },
+    trigger: (type, intensity) => gestures.trigger(type, intensity),
+    cancel: () => gestures.cancel(),
+    get enabled() {
+      return gestures.enabled;
+    },
+    set enabled(v) {
+      gestures.enabled = v;
+    },
+    get auto() {
+      return gestures.auto;
+    },
+    set auto(v) {
+      gestures.auto = v;
+    },
+    seed: (seed) => gestures.setRandom(seed === null ? mathRandom : seededRandom(seed)),
+  },
   get state() {
     return controller.getState();
   },
@@ -106,6 +150,7 @@ if (import.meta.env.DEV) window.__AVATAR_DEBUG__ = debugApi;
 const loop = new RenderLoop((delta) => {
   controller.update(delta);
   emotionPanel?.update();
+  gesturePanel?.update();
   stage.render();
   overlay.afterRender(delta);
   debugApi.fps = overlay.meter.fps;
@@ -135,6 +180,7 @@ async function boot(): Promise<void> {
     visemePanel = new VisemeDebugPanel(lipSyncPanel.folder, analyzers, visemes);
     emotionPanel = new EmotionDebugPanel(panel.gui, audio, controller, emotion, featureWorkletUrl);
     debugApi.emotionPanel = emotionPanel;
+    gesturePanel = new GestureDebugPanel(panel.gui, gestures);
 
     overlay.setInfo({ loaded: true, vrmVersion: formatVrmVersion(avatar.vrmVersion) });
     debugApi.loaded = true;
@@ -170,6 +216,7 @@ if (import.meta.hot) {
     loop.stop();
     controller.dispose();
     emotionPanel?.dispose();
+    gesturePanel?.dispose();
     visemePanel?.dispose();
     lipSyncPanel?.dispose();
     analyzers.dispose();
@@ -186,4 +233,9 @@ if (import.meta.hot) {
 function analyzerFromUrl(): AnalyzerChoice | null {
   const v = new URLSearchParams(location.search).get('analyzer');
   return v === 'none' || v === 'headaudio' || v === 'wlipsync' ? v : null;
+}
+
+function seedFromUrl() {
+  const v = new URLSearchParams(location.search).get('gestureSeed');
+  return v !== null && Number.isFinite(Number(v)) ? seededRandom(Number(v)) : null;
 }

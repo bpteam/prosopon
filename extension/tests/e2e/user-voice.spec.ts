@@ -35,6 +35,12 @@ test.describe('fake microphone', () => {
     chatgpt,
   }) => {
     const { host } = await enableWithVoiceUi(serviceWorker, chatgpt);
+    // US-008: seeded gestures, only boundary ones (no ambient rolls), and a meaningful utterance always nods.
+    await chatgpt.evaluate(() =>
+      document.dispatchEvent(
+        new CustomEvent('prosopon:gesture', { detail: { seed: 1, config: { nodOnUtteranceChance: 1, rateScale: 0, speakStartChance: 0 } } }),
+      ),
+    );
     // Opt-in: nothing listens before this.
     expect(await micInfo(serviceWorker)).toMatchObject({ state: 'off', liveTracks: 0, pipelines: 0 });
     await expect(host).toHaveAttribute('data-mic', 'off');
@@ -51,10 +57,11 @@ test.describe('fake microphone', () => {
     // The user's voice never reaches the avatar's mouth.
     expect(Number(await host.getAttribute('data-mouth-peak'))).toBe(0);
 
-    // User stops: thinking, and a meaningful utterance ends with a nod.
+    // User stops: thinking, and a meaningful utterance ends with a nod (GestureEngine, fed by the utterance end).
     await expect(host).toHaveAttribute('data-user-speaking', 'false', { timeout: 6_000 });
     await expect(host).toHaveAttribute('data-avatar-state', 'thinking');
     await expect(host).toHaveAttribute('data-nods', '1');
+    expect(await host.getAttribute('data-gesture-count')).toBe('1');
 
     // Assistant starts (captured tab audio): speaking, and lip sync still moves the mouth.
     await chatgpt.evaluate(() => (window as any).fixture.playSpeech());
@@ -62,9 +69,30 @@ test.describe('fake microphone', () => {
     await expect(host).toHaveAttribute('data-assistant-speaking', 'true');
     await expect.poll(async () => Number(await host.getAttribute('data-mouth-peak'))).toBeGreaterThan(0.2);
 
+    // The assistant gestures with a hand, kept going until the user interrupts (forced triggers every 250 ms).
+    await chatgpt.evaluate(() => {
+      const w = window as any;
+      w.__handTimer = setInterval(() => {
+        const root = document.querySelector('#prosopon-root');
+        if (root?.getAttribute('data-avatar-state') === 'speaking') {
+          document.dispatchEvent(new CustomEvent('prosopon:gesture', { detail: { trigger: 'hand-emphasis' } }));
+        }
+      }, 250);
+    });
+    await expect(host).toHaveAttribute('data-gesture', 'hand-emphasis', { timeout: 10_000 });
+    await expect.poll(async () => Number(await host.getAttribute('data-arm-offset'))).toBeGreaterThan(0.02);
+
     // Interruption: the second utterance arrives while the assistant is still talking. User wins.
     await expect(host).toHaveAttribute('data-user-speaking', 'true', { timeout: 10_000 });
     await expect(host).toHaveAttribute('data-avatar-state', 'listening');
+    // The hand gesture is cancelled (fast release), not played out; no arm movement while the user talks.
+    await expect(host).not.toHaveAttribute('data-gesture', 'hand-emphasis', { timeout: 2_000 });
+    await expect.poll(async () => Number(await host.getAttribute('data-arm-offset')), { timeout: 2_000 }).toBe(0);
+    for (let i = 0; i < 5; i++) {
+      expect(Number(await host.getAttribute('data-arm-offset'))).toBe(0);
+      await chatgpt.waitForTimeout(150);
+    }
+    await chatgpt.evaluate(() => clearInterval((window as any).__handTimer));
     await expect(host).toHaveAttribute('data-assistant-speaking', 'true');
     expect(Number(await host.getAttribute('data-crosstalk'))).toBeGreaterThanOrEqual(1);
 

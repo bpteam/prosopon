@@ -7,6 +7,9 @@ import { AvatarIdleController } from '@avatar/avatar/AvatarIdleController';
 import { AvatarLoader, disposeVRM } from '@avatar/avatar/AvatarLoader';
 import { UserReactionMapper } from '@avatar/avatar/UserReactionMapper';
 import { EmotionChannels } from '@avatar/avatar/EmotionChannels';
+import { GestureEngine } from '@avatar/avatar/gesture/GestureEngine';
+import { isGestureType, seededRandom, mathRandom, type GestureFrame } from '@avatar/avatar/gesture/Gesture';
+import type { GestureConfigOverrides } from '@avatar/avatar/gesture/GestureConfig';
 import { EMOTION_EXPRESSIONS } from '@avatar/avatar/EmotionExpression';
 import type { EmotionMixConfig } from '@avatar/avatar/BehaviorMixer';
 import { NEUTRAL_EMOTION, type EmotionChannel, type EmotionFrame } from '@avatar/audio/emotion/EmotionFrame';
@@ -30,6 +33,7 @@ import { ConversationSignalResolver, type ConversationSignals } from './Conversa
  *   LipSyncFrame.active ───────┼─► ConversationSignalResolver ─► AvatarController.setState
  *   UserVoiceFrame.speaking ───┘
  *   UserVoiceFrame ─► UserReactionMapper ─► (ReactionSource) BehaviorMixer
+ *                                        └─ utterance ends ─► GestureEngine ─► (GestureSource) BehaviorMixer
  *   LipSyncFrame ─► FrameMouthSource ─► (MouthSource) BehaviorMixer      the mouth follows the assistant only
  *   EmotionFrame (user, assistant) ─► EmotionChannels ─► (EmotionSource) BehaviorMixer   face/body, never the mouth
  */
@@ -68,7 +72,10 @@ export interface Diagnostics {
   resolvedState: string;
   crosstalkEvents: number;
   suppressedInterruptions: number;
+  /** Nods started by GestureEngine (at user utterance ends, or while listening). */
   nods: number;
+  gesture: Readonly<GestureFrame>;
+  gestureCount: number;
   emotionStatus: EmotionStatus;
   /** Last EmotionFrame received per channel (as sent; the avatar follows it smoothly). */
   emotion: Record<EmotionChannel, Readonly<EmotionFrame>>;
@@ -87,6 +94,7 @@ export interface ProsoponDebug {
   setEmotionEnabled(channel: EmotionChannel, enabled: boolean): void;
   /** Mapping bounds of the emotion layer; mutable for calibration. */
   emotionConfig: EmotionMixConfig;
+  gesture: GestureEngine;
 }
 
 declare global {
@@ -116,6 +124,13 @@ const DEBUG_RATE = 8;
  *   document.dispatchEvent(new CustomEvent('prosopon:emotion', { detail: { channel: 'user', enabled: false } }))
  */
 const EMOTION_DEBUG_EVENT = 'prosopon:emotion';
+/**
+ * Same for gestures (development builds): seed the scheduler, override config, trigger or cancel, e.g.
+ *   document.dispatchEvent(new CustomEvent('prosopon:gesture', { detail: { seed: 1, trigger: 'nod' } }))
+ * detail: { seed?: number | null, config?: GestureConfigOverrides (top-level numbers/booleans), auto?, enabled?,
+ * trigger?: GestureType, cancel?: true }
+ */
+const GESTURE_DEBUG_EVENT = 'prosopon:gesture';
 
 export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle {
   const doc = options.doc ?? document;
@@ -132,6 +147,8 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
   const resolver = new ConversationSignalResolver(controller);
   const emotion = new EmotionChannels();
   controller.setEmotionSource(emotion);
+  const gestures = new GestureEngine();
+  controller.setGestureSource(gestures);
   /** Seconds since the last user voice frame; the user is not speaking once frames stop. */
   let userFrameAge = Infinity;
   const USER_FRAME_STALE = 0.5;
@@ -159,6 +176,8 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
     crosstalkEvents: 0,
     suppressedInterruptions: 0,
     nods: 0,
+    gesture: gestures.current,
+    gestureCount: 0,
     emotionStatus: { model: 'off', mode: 'heuristic', inferences: 0 },
     emotion: { user: NEUTRAL_EMOTION, assistant: NEUTRAL_EMOTION },
     emotionFrames: { user: 0, assistant: 0 },
@@ -185,6 +204,24 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
       setEmotionEnabled('assistant', on),
     );
     doc.addEventListener(EMOTION_DEBUG_EVENT, onEmotionDebug);
+    doc.addEventListener(GESTURE_DEBUG_EVENT, onGestureDebug);
+  }
+  function onGestureDebug(event: Event): void {
+    const d = (event as CustomEvent<Record<string, unknown> | null>).detail;
+    if (!d || typeof d !== 'object') return;
+    if (d.seed === null) gestures.setRandom(mathRandom);
+    else if (typeof d.seed === 'number' && Number.isFinite(d.seed)) gestures.setRandom(seededRandom(d.seed));
+    if (d.config && typeof d.config === 'object') {
+      // Top-level scalars only: enough for E2E (chances, rates) without letting a page event reshape the tables.
+      const cfg = gestures.config as unknown as Record<string, unknown>;
+      for (const [k, v] of Object.entries(d.config as GestureConfigOverrides)) {
+        if (k in cfg && typeof cfg[k] === typeof v && (typeof v === 'number' || typeof v === 'boolean')) cfg[k] = v;
+      }
+    }
+    if (typeof d.auto === 'boolean') gestures.auto = d.auto;
+    if (typeof d.enabled === 'boolean') gestures.enabled = d.enabled;
+    if (d.cancel === true) gestures.cancel();
+    if (isGestureType(d.trigger)) gestures.trigger(d.trigger);
   }
   const resetUserVoice = () => {
     diag.userVoice = SILENT_USER_VOICE_FRAME;
@@ -212,6 +249,7 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
       get emotionConfig() {
         return controller.emotionConfig;
       },
+      gesture: gestures,
     };
   }
   let mouthPeak = 0;
@@ -305,7 +343,9 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
     diag.resolvedState = conv.resolved;
     diag.crosstalkEvents = conv.crosstalkEvents;
     diag.suppressedInterruptions = conv.suppressedInterruptions;
-    diag.nods = reaction.nods;
+    diag.nods = gestures.nods;
+    diag.gesture = gestures.current;
+    diag.gestureCount = gestures.history.gestureCount;
     d.mic = diag.mic.state;
     d.userSpeaking = String(conv.signals.userSpeaking);
     d.assistantSpeaking = String(conv.signals.assistantSpeaking);
@@ -314,7 +354,13 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
     d.userEnergy = u.energy.toFixed(3);
     d.userPitch = u.pitchHz === null ? 'null' : u.pitchHz.toFixed(1);
     d.crosstalk = String(conv.crosstalkEvents);
-    d.nods = String(reaction.nods);
+    d.nods = String(gestures.nods);
+    const g = gestures.current;
+    d.gesture = g.type ?? '';
+    d.gesturePhase = g.phase;
+    d.gestureCount = String(gestures.history.gestureCount);
+    // Largest arm offset in the composed pose: "no large arm movement after an interruption".
+    d.armOffset = maxArmOffset(controller.pose).toFixed(4);
     const r = reaction.value;
     const mix = controller.emotionMix;
     const pose = controller.pose;
@@ -360,7 +406,8 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
         `speaking    ${u.speaking ? 'yes' : 'no'} · segment ${u.segmentDuration.toFixed(2)} s · ${diag.userFrames} frames`,
         `level       ${u.rmsDb.toFixed(1)} dBFS · floor ${u.noiseFloorDb.toFixed(1)} · energy ${u.energy.toFixed(2)}`,
         `pitch       ${u.pitchHz === null ? '—' : `${u.pitchHz.toFixed(0)} Hz`} · conf ${u.pitchConfidence.toFixed(2)} · rel ${u.relativePitch.toFixed(1)} st · var ${u.pitchVariation.toFixed(1)} st`,
-        `reaction    engagement ${r.engagement.toFixed(2)} · lift ${r.pitchLift.toFixed(2)} · nods ${reaction.nods}`,
+        `reaction    engagement ${r.engagement.toFixed(2)} · lift ${r.pitchLift.toFixed(2)} · utterances ${r.utteranceEnds}`,
+        `gesture     ${g.type ?? '—'}${g.active ? ` · ${g.phase} · ${g.intensity.toFixed(2)}` : ''} · ${gestures.history.gestureCount} total · nods ${gestures.nods} · cooldown ${gestures.cooldownRemaining.toFixed(1)} s`,
         '— Conversation',
         `signals     voice UI ${conv.signals.voiceUiActive ? 'on' : 'off'} · user ${conv.signals.userSpeaking ? 'speaking' : '—'} · assistant ${conv.signals.assistantSpeaking ? 'speaking' : '—'}`,
         `resolved    ${conv.resolved}${conv.crosstalk ? ' · CROSSTALK' : ''} · crosstalk ${conv.crosstalkEvents} · ignored ${conv.suppressedInterruptions}`,
@@ -432,6 +479,7 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
       loop.stop();
       stopObserving();
       doc.removeEventListener(EMOTION_DEBUG_EVENT, onEmotionDebug);
+      doc.removeEventListener(GESTURE_DEBUG_EVENT, onGestureDebug);
       if (window.__PROSOPON_DEBUG__?.diagnostics === diag) delete window.__PROSOPON_DEBUG__;
       restoreOrb?.();
       restoreOrb = null;
@@ -442,4 +490,12 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
       overlay.dispose();
     },
   };
+}
+
+function maxArmOffset(pose: Readonly<Record<string, number>>): number {
+  let max = 0;
+  for (const k of ['leftUpperArm', 'leftLowerArm', 'rightUpperArm', 'rightLowerArm']) {
+    for (const axis of ['X', 'Y', 'Z']) max = Math.max(max, Math.abs(pose[k + axis] ?? 0));
+  }
+  return max;
 }

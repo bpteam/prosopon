@@ -1,4 +1,4 @@
-# Avatar sandbox (US-001, US-002, US-003, US-006)
+# Avatar sandbox (US-001, US-002, US-003, US-006, US-008)
 
 Standalone browser sandbox for developing the VRM avatar renderer. It has no dependencies on ChatGPT or Chrome Extension APIs.
 
@@ -166,6 +166,31 @@ file*) or the mic, route it as the assistant's or the user's channel, watch both
 mix, move the analyser/mapping sliders, and *copy changed settings (JSON)*. *load ./emotion-model/model.json* tries a
 local model from `public/emotion-model/`.
 
+### Gestures (US-008)
+
+`avatar/gesture/` (architecture-tested: no Avatar, AvatarController, three or three-vrm, not even as types):
+
+- `Gesture.ts` — contracts: `GestureType`, `GestureFrame` (offsets for head, body, shoulders, upper/lower arms),
+  `GestureContext`, `GestureSource`, injectable `RandomSource` (`seededRandom` for tests/E2E).
+- `GestureConfig.ts` — `GESTURE_CONFIG`: per type duration/cooldown/envelope/amplitudes (radians at intensity 1),
+  per-state rates, emotion compression, nod rules; `GESTURE_LIMITS` for the gesture layer.
+- `GestureEngine` — one primary gesture at a time, `prepare → attack → hold → release`, randomised cooldown,
+  Poisson rates per state (frame-rate independent) scaled by the assistant's arousal/intonation while speaking,
+  repeat penalty, priorities (boundary > speaking emphasis > ambient; forced/debug > all). Cancel and interruption
+  (speaking → user takes the floor) release in 150–200 ms, never snap. Hands only while the assistant speaks.
+- The nod moved here from `UserReactionMapper`, which now only reports `speaking`, `utteranceEnds` (monotonic
+  counter) and `lastUtteranceDuration`.
+
+`AvatarController.setGestureSource()` builds the context each frame; `BehaviorMixer` clamps the gesture layer to
+`GESTURE_LIMITS`, adds it on top of idle/state/emotion, then clamps the procedural sum to `POSE_LIMITS`; `Avatar`
+adds those offsets to the manual rotations (REST_POSE included), so arms return to the lowered rest, not T-pose.
+Missing bones are skipped; no shoulder bones → shoulder shift becomes a chest roll.
+
+GUI **Gestures**: Enabled / Auto, readouts (current, phase, progress, intensity, cooldown), a button per gesture
+and Cancel, amplitude sliders per type, *copy settings*. `?gestureSeed=N` seeds the scheduler.
+`window.__AVATAR_DEBUG__.gesture`: `current`, `trigger(type, intensity?)`, `cancel()`, `enabled`, `auto`,
+`seed(n | null)`, `engine`. Tuning checklist: `docs/US-008-calibration.md`.
+
 ### Pose layering
 
 `Avatar` composes two layers once per frame:
@@ -173,7 +198,7 @@ local model from `public/emotion-model/`.
 | layer      | written by                                           | composition                              |
 |------------|------------------------------------------------------|------------------------------------------|
 | manual     | `setExpression`, `setBoneRotation`, `setHeadRotation`| base value                               |
-| procedural | `setProcedural` (AvatarController: idle × state + mouth + emotion) | added to bones; `blink`, `aa/ih/ou/ee/oh`, `happy/relaxed/sad/angry/surprised` = `max(manual, procedural)` |
+| procedural | `setProcedural` (AvatarController → BehaviorMixer: idle × state + mouth + emotion + gestures) | added to bones; `blink`, `aa/ih/ou/ee/oh`, `happy/relaxed/sad/angry/surprised` = `max(manual, procedural)` |
 
 Expression owners: visemes → lip sync, emotion presets → emotion layer, `blink` → idle, anything → manual/debug.
 VRM `overrideMouth`/`overrideBlink: blend` on an emotion preset would scale visemes/blink by `1 − Σweights` in
@@ -181,7 +206,7 @@ three-vrm; `Avatar` divides them by that factor first, so an active smile doesn'
 that `block` get no procedural emotion.
 
 Because of the layering, debug sliders and idle motion don't overwrite each other. Rotations of bones that `Avatar` drives
-(head, neck, chest, spine, shoulders, and anything set via `setBoneRotation`) are rewritten every frame, so write
+(head, neck, chest, spine, shoulders, upper/lower arms, and anything set via `setBoneRotation`) are rewritten every frame, so write
 them through the API, not directly on `getBone()` nodes.
 
 ### Gaze

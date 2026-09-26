@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import type { VRMHumanBoneName } from '@pixiv/three-vrm';
 import { CLOSED_MOUTH, VISEMES, type MouthShape, type Viseme } from './MouthShape';
 import { EMOTION_EXPRESSIONS, NO_EMOTION_EXPRESSIONS, isEmotionExpression, type EmotionExpressions } from './EmotionExpression';
+import { BODY_POSE_KEYS, NEUTRAL_BODY_POSE, type BodyPose } from './BodyPose';
 
 export type HumanBoneName = VRMHumanBoneName;
 
@@ -49,8 +50,8 @@ export function isViseme(name: string): name is Viseme {
   return VISEME_SET.has(name);
 }
 
-/** Output of procedural animation (idle, lip sync, emotion). Combined with the manual layer. */
-export interface ProceduralPose extends MouthShape, EmotionExpressions {
+/** Output of procedural animation (idle, lip sync, emotion, gestures). Combined with the manual layer. */
+export interface ProceduralPose extends MouthShape, EmotionExpressions, BodyPose {
   /** Head offsets, radians. */
   headYaw: number;
   headPitch: number;
@@ -66,6 +67,7 @@ export interface ProceduralPose extends MouthShape, EmotionExpressions {
   gazePitch: number;
   // aa/ih/ou/ee/oh (MouthShape): procedural viseme weights from lip sync, combined with manual values via max().
   // happy/relaxed/sad/angry/surprised (EmotionExpressions): emotion layer weights, combined with manual via max().
+  // bodyYaw/bodyRoll/shoulders/arms (BodyPose): gesture offsets, added to the manual rotation (REST_POSE).
 }
 
 export const EMPTY_PROCEDURAL_POSE: Readonly<ProceduralPose> = Object.freeze({
@@ -79,6 +81,7 @@ export const EMPTY_PROCEDURAL_POSE: Readonly<ProceduralPose> = Object.freeze({
   gazePitch: 0,
   ...CLOSED_MOUTH,
   ...NO_EMOTION_EXPRESSIONS,
+  ...NEUTRAL_BODY_POSE,
 });
 
 export interface AvatarLogger {
@@ -102,11 +105,28 @@ const BREATH = {
   shoulderLift: 0.018,
 } as const;
 
+/** Bones the procedural layer writes every frame (on top of their manual rotation). */
+const PROCEDURAL_BONES = [
+  'head',
+  'neck',
+  'chest',
+  'spine',
+  'leftShoulder',
+  'rightShoulder',
+  'leftUpperArm',
+  'rightUpperArm',
+  'leftLowerArm',
+  'rightLowerArm',
+] as const satisfies readonly HumanBoneName[];
+
 /** How the lean offset is distributed over the spine chain (fractions sum to 1). */
 const LEAN = {
   spine: 0.6,
   chest: 0.4,
 } as const;
+
+/** Shoulder lift falls back to this much chest roll per radian when the model has no shoulder bones. */
+const SHOULDER_FALLBACK_ROLL = 0.5;
 
 const BLINK_EXPRESSION = 'blink';
 
@@ -133,7 +153,7 @@ interface DrivenBone {
  *
  * Two layers are composed once per frame in update():
  *  - manual: set via setExpression / setBoneRotation (debug UI, future controllers)
- *  - procedural: set via setProcedural (AvatarController: idle + conversation state)
+ *  - procedural: set via setProcedural (AvatarController → BehaviorMixer: idle, state, lip sync, emotion, gestures)
  */
 export class Avatar {
   private readonly vrm: AvatarRuntime;
@@ -151,6 +171,7 @@ export class Avatar {
   private readonly drivenBones: DrivenBone[] = [];
   private readonly drivenByName = new Map<HumanBoneName, DrivenBone>();
   private readonly procedural: ProceduralPose = { ...EMPTY_PROCEDURAL_POSE };
+  private readonly hasShoulders: boolean;
 
   private readonly gazeTarget = new THREE.Object3D();
   private gazeAnchor: THREE.Object3D | null = null;
@@ -183,10 +204,9 @@ export class Avatar {
       );
     }
 
-    // Bones driven by procedural animation are always registered.
-    for (const bone of ['head', 'neck', 'chest', 'spine', 'leftShoulder', 'rightShoulder'] as const) {
-      this.ensureDriven(bone);
-    }
+    // Bones driven by procedural animation are always registered (missing ones are skipped).
+    for (const bone of PROCEDURAL_BONES) this.ensureDriven(bone);
+    this.hasShoulders = this.drivenByName.has('leftShoulder') && this.drivenByName.has('rightShoulder');
     for (const [bone, rotation] of Object.entries(options.restPose ?? {})) {
       if (rotation) this.setBoneRotation(bone as HumanBoneName, rotation);
     }
@@ -315,6 +335,7 @@ export class Avatar {
     p.gazePitch = pose.gazePitch;
     for (const v of VISEMES) p[v] = clamp01(pose[v]);
     for (const e of EMOTION_EXPRESSIONS) p[e] = clamp01(pose[e]);
+    for (const k of BODY_POSE_KEYS) p[k] = finite(pose[k]);
   }
 
   getProcedural(): Readonly<ProceduralPose> {
@@ -358,6 +379,8 @@ export class Avatar {
   private applyBones(): void {
     const p = this.procedural;
     const e = this.scratchEuler;
+    // No shoulder bones: the shoulder shift degrades to a chest roll (positive left lift = roll to the right).
+    const shoulderRoll = this.hasShoulders ? 0 : (p.shoulderRight - p.shoulderLeft) * SHOULDER_FALLBACK_ROLL;
     for (let i = 0; i < this.drivenBones.length; i++) {
       const bone = this.drivenBones[i]!;
       e.copy(bone.manual);
@@ -372,15 +395,39 @@ export class Avatar {
           break;
         case 'chest':
           e.x += p.breath * BREATH.chestPitch + p.lean * LEAN.chest;
+          e.y += p.bodyYaw * LEAN.chest;
+          e.z += p.bodyRoll * LEAN.chest + shoulderRoll;
           break;
         case 'spine':
           e.x += p.breath * BREATH.spinePitch + p.lean * LEAN.spine;
+          e.y += p.bodyYaw * LEAN.spine;
+          e.z += p.bodyRoll * LEAN.spine;
           break;
         case 'leftShoulder':
-          e.z += p.breath * BREATH.shoulderLift;
+          e.z += p.breath * BREATH.shoulderLift + p.shoulderLeft;
           break;
         case 'rightShoulder':
-          e.z -= p.breath * BREATH.shoulderLift;
+          e.z -= p.breath * BREATH.shoulderLift + p.shoulderRight;
+          break;
+        case 'leftUpperArm':
+          e.x += p.leftUpperArmX;
+          e.y += p.leftUpperArmY;
+          e.z += p.leftUpperArmZ;
+          break;
+        case 'leftLowerArm':
+          e.x += p.leftLowerArmX;
+          e.y += p.leftLowerArmY;
+          e.z += p.leftLowerArmZ;
+          break;
+        case 'rightUpperArm':
+          e.x += p.rightUpperArmX;
+          e.y += p.rightUpperArmY;
+          e.z += p.rightUpperArmZ;
+          break;
+        case 'rightLowerArm':
+          e.x += p.rightLowerArmX;
+          e.y += p.rightLowerArmY;
+          e.z += p.rightLowerArmZ;
           break;
         default:
           break;
@@ -451,6 +498,10 @@ function amount(mode: Override | undefined, weight: number): number {
   if (mode === 'blend') return weight;
   if (mode === 'block') return weight > 0 ? 1 : 0;
   return 0;
+}
+
+function finite(value: number): number {
+  return Number.isFinite(value) ? value : 0;
 }
 
 export function clamp01(value: number): number {
