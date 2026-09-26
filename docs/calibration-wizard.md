@@ -1,8 +1,9 @@
 # Real voice calibration wizard
 
 Developer Tools → **Calibration** runs a scripted session against the real ChatGPT Voice and exports a ZIP that a
-coding agent can use to tune the avatar (`AGENT_TASK.md` inside the bundle is that task). The user presses
-**Start**, speaks when asked, and presses **Export**. Nothing is tuned, committed or uploaded by the wizard itself.
+coding agent can use to tune the avatar (`AGENT_TASK.md` inside the bundle is that task). You prepare the chat and
+open Voice yourself, then press **Start**, speak when asked, and press **Export**. Nothing is tuned, committed or
+uploaded by the wizard itself.
 
 Code: `extension/src/calibration/` (runner, scenarios, trace, analysis, reports, ZIP/WAV), the recorder
 `extension/src/offscreen/CalibrationRecorder*.ts`, the panel `extension/src/ui/dev/calibrationPanel.ts`, the export
@@ -23,10 +24,12 @@ Architecture and privacy rules: [../PRODUCT.md](../PRODUCT.md) (invariants 5, 14
 
 1. Preflight: tab capture running, microphone on (auto-fix), config snapshot, offscreen recorder session.
 2. Environment: voice name and mode from the page (`detectVoiceEnvironment`); unknown → a voice picker.
-3. A new chat, then a setup prompt typed through the composer (text mode).
-4. Voice started (`startVoice`), its controls mounted, ChatGPT's microphone muted, then the wizard waits for 1.2 s
-   of quiet. This drains Voice's startup chime before any sample is armed. If start fails: *I couldn't start ChatGPT
-   Voice automatically. [Open Voice]*.
+3. The wizard leaves the current chat, route and page untouched: it never creates a chat, clears its messages,
+   refreshes the page or sends a setup prompt. Prepare the conversation context yourself.
+4. You start ChatGPT Voice yourself, then press **Start calibration**. The wizard never clicks ChatGPT's Voice
+   control or accepts its permission UI. It waits for Voice controls, mutes ChatGPT's microphone, then waits for
+   1.2 s of quiet. This drains Voice's startup chime before any sample is armed. If Voice closes later, reopen it
+   yourself and the run resumes.
 5. Per language RU → UK → EN → ES: each assistant sample is a prompt typed into the composer asking ChatGPT to say a
    composite sentence verbatim; Prosopon accepts it only after sustained assistant audio *and* a new rendered
    assistant turn. A chime, tab noise, a closed Voice session, crosstalk from the user mic, or audio without a new
@@ -88,8 +91,6 @@ below is **unverified against production** and must be checked in a real browser
 3. **Selectors** (`CHATGPT_SELECTORS`, all guesses except the orb and the assistant message):
    - composer `#prompt-textarea` or `contenteditable[role=textbox]` — typing through `execCommand('insertText')`;
    - send `[data-testid="send-button"]` / `#composer-submit-button`, otherwise native composer form submission;
-   - new chat `[data-testid="create-new-chat-button"]`, otherwise exact localized accessible text (including
-     *Новий чат*);
    - start voice `[data-testid="composer-speech-button"]`, English fallback *Start voice mode*, and the observed
      Ukrainian fallback *Почати голосову розмову*;
    - mute English controls or observed Ukrainian *Вимкнути/Увімкнути мікрофон*; the resulting state is confirmed,

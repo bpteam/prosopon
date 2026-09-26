@@ -83,6 +83,7 @@ export function calibrationPanel(doc: Document, bridge: DevBridge, slot: Calibra
         doc,
         'Real Voice Calibration',
         ...Object.values(kv).map((x) => x.el),
+        h(doc, 'p', { class: 'secondary' }, 'Prepare this chat yourself, start ChatGPT Voice, then press Start calibration. The wizard will not create, clear, navigate or refresh a chat.'),
         h(doc, 'p', { class: 'secondary' }, 'Calibration will temporarily record audio locally for analysis. Nothing is uploaded.'),
         h(doc, 'p', { class: 'secondary' }, 'Use headphones: ChatGPT Voice hears your speakers.'),
         h(

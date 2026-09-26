@@ -11,6 +11,9 @@ async function runAll(world: ReturnType<typeof createWorld>, runner: Calibration
   let finished = false;
   void done.then(() => (finished = true));
   const onFrame = () => {
+    // Voice is a deliberate user action in production; this fake user opens it when the wizard asks.
+    if (runner.view.phase === 'paused' && runner.view.action?.id === 'open-voice') void world.chat.startVoice();
+    if (runner.view.phase === 'paused' && runner.view.action?.id === 'resume-voice') void world.chat.startVoice();
     const p = runner.view.prompt;
     if (p?.speakNow && !p.listening && !world.userSpeaking && spokeFor !== p) {
       spokeFor = p;
@@ -110,7 +113,7 @@ describe('CalibrationRunner', () => {
     expect(manifest.chatgpt.voiceDetection).toBe('unknown');
   }, 60_000);
 
-  it('pauses with an actionable button when Voice cannot be started, and resumes when it is open', async () => {
+  it('waits for the user to open Voice and resumes once the session is present', async () => {
     const { world, runner } = setup({ voiceStarts: false }, buildScenario({ languages: ['en'], user: false, categories: ['question.normal'] }));
     void runner.start();
     await world.advance(3000, (dt) => runner.tick(dt));
@@ -147,6 +150,7 @@ describe('CalibrationRunner', () => {
     void runner.start();
     for (let i = 0; i < 60 && runner.view.phase !== 'complete'; i++) {
       await world.advance(1000, (dt) => runner.tick(dt), () => {
+        if (runner.view.phase === 'paused' && runner.view.action?.id === 'open-voice') void world.chat.startVoice();
         if (!flagged && runner.view.flaggable) {
           flagged = true;
           runner.flag();

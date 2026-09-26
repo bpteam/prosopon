@@ -133,8 +133,9 @@ never reaches `src/ui`. Escape closes the focused window; all windows are `role=
 
 ### Calibration wizard
 
-Developer Tools → *Calibration*: select one or more languages (Russian by default) → Start → automatic scripted
-session with ChatGPT Voice → Export ZIP. Procedure, bundle contents and manual checks:
+Developer Tools → *Calibration*: prepare the current ChatGPT conversation and start Voice yourself → select one or
+more languages (Russian by default) → Start → automatic scripted session → Export ZIP. The wizard never creates a
+new chat, navigates, refreshes the page or sends a setup message. Procedure, bundle contents and manual checks:
 [../docs/calibration-wizard.md](../docs/calibration-wizard.md).
 
 - `src/calibration/` (in the Dev UI chunk; imports no avatar runtime, renderer or DOM, architecture-tested):
@@ -372,7 +373,7 @@ IndexedDB. The `PROSOPON_EMBED_MODEL=1 …` script syntax needs a POSIX shell (u
 - **Calibration wizard automation** (`ConversationAutomation` in `ChatGPTAdapter`): current Voice uses a readiness
   barrier (controls present + quiet startup), confirms mute state and accepts a reply only after sustained audio and
   a new rendered assistant turn. Current Ukrainian Start Voice and mute labels are covered alongside stable data
-  attributes; send/new-chat and the remaining locales still need the real-page checks in
+  attributes; send and the remaining locales still need the real-page checks in
   [../docs/calibration-wizard.md](../docs/calibration-wizard.md#manual-checks-on-real-chatgptcom).
 - **VRM expression overrides.** Presets with `overrideMouth: blend` are pre-compensated; a model whose emotion
   presets `block` the mouth gets no procedural emotion on them (warned once).
@@ -405,8 +406,8 @@ Playwright's default `--mute-audio` is removed so the captured audio isn't silen
   avatar keeps running).
 - `semantic.spec.ts`: a reply streamed into the fixture (`fixture.streamReply`) → cues and intents on the overlay
   host; the reply present at activation is ignored; `prosopon:semantic` off stops analysis.
-- `calibration.spec.ts`: the wizard end to end on the fixture (reduced by `prosopon:calibration`): Start → setup
-  prompt and samples typed through the composer → the fixture speaks them (real tab audio) → analysis → Export →
+- `calibration.spec.ts`: the wizard end to end on the fixture (reduced by `prosopon:calibration`): user-opened Voice
+  → samples typed through the prepared composer → the fixture speaks them (real tab audio) → analysis → Export →
   the export page downloads the ZIP, whose manifest, trace, text, WAVs and agent task are checked; Discard.
 - `emotion.spec.ts`: assistant and user channels through to the mixer, interruption priority swap, the Dev Tools
   emotion switch; local-model WASM and failure paths use the `avatar/tests/fixtures/loudness-probe.onnx` plumbing

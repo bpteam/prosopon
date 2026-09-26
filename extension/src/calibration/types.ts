@@ -74,8 +74,6 @@ export interface CalibrationStep {
 export interface CalibrationScenario {
   id: string;
   languages: CalibrationLanguage[];
-  /** Sent once as the first text message of the calibration chat. */
-  setupMessage: string;
   steps: CalibrationStep[];
 }
 

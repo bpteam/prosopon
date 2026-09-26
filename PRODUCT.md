@@ -101,7 +101,7 @@ Rules marked *(tested)* are enforced by `avatar/tests/unit/architecture.test.ts`
 4. **Gesture code is renderer-free** *(tested)*. `avatar/src/avatar/gesture/` imports no Avatar, AvatarController,
    three or three-vrm, not even as types. `GestureEngine` emits `GestureFrame`s; it never touches bones.
 5. **ChatGPT DOM is isolated** *(tested)*. All ChatGPT selectors and DOM knowledge (including the calibration
-   wizard's automation: composer, send, new chat, voice start, mute, voice detection) live in `ChatGPTAdapter`
+   wizard's automation: composer, send, voice start, mute, voice detection) live in `ChatGPTAdapter`
    (`CHATGPT_SELECTORS`). Selector breakage is fixed there and nowhere else.
 6. **One conversation-state resolver** *(tested)*. Audio processors emit signals; only `ConversationSignalResolver` (extension
    content script) calls `controller.setState()`.
@@ -404,9 +404,11 @@ Debug APIs are development-only and must not become runtime dependencies.
   Whether ChatGPT's own echo cancellation still works while the tab is captured is unverified. Headphones are the
   safe setup.
 - **Calibration.** VAD, pitch, prosody and gesture thresholds are tuned on synthetic signals. The calibration
-  wizard collects real-voice data but tunes nothing. It arms assistant samples only after Voice is ready and quiet,
-  and accepts one only when sustained tab speech has a new rendered assistant turn; startup chimes and tab noise
-  cannot become samples. Its ChatGPT automation (typing a prompt during Voice, the composer/send/new-chat/voice/mute
+  wizard collects real-voice data but tunes nothing. The user prepares the existing ChatGPT conversation and opens
+  Voice; the wizard never creates a chat, clears it, navigates or refreshes the page. It arms assistant samples only
+  after Voice is ready and quiet, and accepts one only when sustained tab speech has a new rendered assistant turn;
+  startup chimes and tab noise cannot become samples. Its ChatGPT automation (typing a prompt during Voice, the
+  composer/send/voice/mute
   selectors, voice-name detection, reply text in voice mode) still has fixture-only paths and needs the real-page
   checks in [docs/calibration-wizard.md](docs/calibration-wizard.md#manual-checks-on-real-chatgptcom). Other
   procedures are manual ([docs/](docs/)).

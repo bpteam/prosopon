@@ -24,22 +24,6 @@ export const LANGUAGE_NAMES: Readonly<Record<CalibrationLanguage, string>> = Obj
   es: 'Spanish',
 });
 
-export const SETUP_MESSAGE = [
-  'We are running an automated Prosopon voice calibration.',
-  '',
-  'Follow the instructions in each following message exactly.',
-  '',
-  'When asked to say a calibration phrase:',
-  '- reply only with the requested spoken text;',
-  '- do not explain the exercise;',
-  '- do not add introductions;',
-  '- do not add comments;',
-  '- preserve the requested language;',
-  '- use the requested speaking style naturally.',
-  '',
-  'Wait for the next instruction after every response. Reply to this message with "Ready." only.',
-].join('\n');
-
 interface AssistantCategory {
   category: string;
   style: SpeakingStyle;
@@ -264,5 +248,5 @@ export function buildScenario(options: ScenarioOptions = {}): CalibrationScenari
       });
     }
   }
-  return { id: options.categories || options.languages ? 'custom' : 'quick-full', languages, setupMessage: SETUP_MESSAGE, steps };
+  return { id: options.categories || options.languages ? 'custom' : 'quick-full', languages, steps };
 }

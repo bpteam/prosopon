@@ -5,8 +5,8 @@ import { expect, root, tabIdOf, test, toggle } from './extension';
 
 /**
  * Calibration wizard end to end on the fixture page, reduced to one language and two assistant samples (the debug
- * event 'prosopon:calibration'): Start → preflight → fresh chat + setup prompt → Voice → voice detected from the page
- * → prompts typed into the composer → the fixture "speaks" them (tab audio) and streams the text → analysis →
+ * event 'prosopon:calibration'): the user opens Voice → Start → preflight → prompts typed into the prepared composer
+ * → the fixture "speaks" them (tab audio) and streams the text → analysis →
  * Export → the export page downloads the ZIP. The real chatgpt.com DOM is a manual check: docs/calibration-wizard.md.
  */
 
@@ -29,13 +29,15 @@ test('Start → automatic run → Export: the ZIP holds the manifest, trace, tex
   const panel = devtools.locator('[data-testid="calibration"]');
   await expect(panel.locator('[data-testid="calibration-capture"]')).toContainText('Ready');
 
+  // The user owns conversation setup and opens Voice before Start; the wizard never navigates or creates a chat.
+  await chatgpt.evaluate(() => (window as any).fixture.openVoice());
   await panel.locator('[data-testid="calibration-start"]').click();
   const phase = panel.locator('[data-testid="calibration-phase"]');
   await expect(phase).toHaveAttribute('data-phase', 'complete', { timeout: 150_000 });
   await expect(panel.locator('[data-testid="calibration-samples"]')).toHaveText('2 / 2 valid');
   const sent: string[] = await chatgpt.evaluate(() => (window as any).fixture.sent);
-  expect(sent).toHaveLength(3); // setup + two samples, all through the composer
-  expect(sent[1]).toMatch(/"[^"]+"\s*$/);
+  expect(sent).toHaveLength(2); // two samples, all through the already prepared composer
+  expect(sent[0]).toMatch(/"[^"]+"\s*$/);
   // ChatGPT's own mic was muted for the scripted steps and given back afterwards.
   expect(await chatgpt.evaluate(() => (window as any).fixture.muted)).toBe(false);
 

@@ -9,7 +9,7 @@ import { CALIBRATION_FILE_CHUNK, type CalibrationReply } from '../shared/message
 /**
  * Phases of the calibration state machine:
  *
- *   idle → preflight → detect-environment → prepare-chat → start-voice → (pick-voice) →
+ *   idle → preflight → detect-environment → start-voice → (pick-voice) →
  *   assistant-<lang>… → user-<lang>… → interruption → analyse → complete → exporting → exported
  *
  * `paused` waits for the one thing only the user can do (open Voice, pick the voice); the run then continues from
@@ -19,7 +19,6 @@ export type CalibrationPhase =
   | 'idle'
   | 'preflight'
   | 'detect-environment'
-  | 'prepare-chat'
   | 'start-voice'
   | 'pick-voice'
   | 'assistant'
@@ -33,7 +32,7 @@ export type CalibrationPhase =
   | 'failed'
   | 'discarded';
 
-export type CalibrationActionId = 'open-voice' | 'resume-voice' | 'new-chat' | 'mic';
+export type CalibrationActionId = 'open-voice' | 'resume-voice' | 'mic';
 
 export interface CalibrationView {
   phase: CalibrationPhase;
@@ -91,7 +90,6 @@ export const DEFAULT_TIMING = Object.freeze({
   interruptLead: 2,
   countdown: 3,
   interruptOnset: 8,
-  setupReply: 30,
   voiceStart: 12,
   /** Voice controls must be mounted and tab audio quiet before the first scripted prompt is armed. */
   voiceReady: 10,
@@ -236,9 +234,6 @@ export class CalibrationRunner {
     this.set({ phase: 'detect-environment', label: 'detect-environment', message: 'Detecting the ChatGPT voice…' });
     this.detectEnvironment();
 
-    this.set({ phase: 'prepare-chat', label: 'prepare-chat', message: 'Preparing a fresh calibration chat…' });
-    await this.prepareChat();
-
     this.set({ phase: 'start-voice', label: 'start-voice', message: 'Starting ChatGPT Voice…' });
     await this.ensureVoice(true);
     this.detectEnvironment();
@@ -296,23 +291,7 @@ export class CalibrationRunner {
     this.updateEnvironmentView();
   }
 
-  private async prepareChat(): Promise<void> {
-    const chat = this.host.chat;
-    if (!(await chat.ensureFreshChat())) {
-      await this.waitForUser(
-        { id: 'new-chat', label: 'Open new chat', text: "I couldn't open a new chat automatically. Open a new, empty chat." },
-        () => chat.isConversationEmpty() && chat.isComposerReady(),
-        () => chat.ensureFreshChat(),
-      );
-    }
-    const before = chat.countAssistantMessages();
-    if (await chat.sendMessage(this.scenario.setupMessage)) {
-      this.trace!.event('prompt-sent', { setup: true });
-      await this.clock.until(() => chat.countAssistantMessages() > before, this.timing.setupReply);
-    }
-  }
-
-  /** Voice must be running; reopen it once, then ask the user. */
+  /** Voice is deliberately a user action: the wizard never opens a Voice session or accepts its permission UI. */
   private async ensureVoice(first = false): Promise<void> {
     const chat = this.host.chat;
     if (chat.isVoiceModeActive()) {
@@ -320,18 +299,13 @@ export class CalibrationRunner {
       return;
     }
     if (!first) this.trace?.event('recovery', { voiceClosed: true });
-    if (await chat.startVoice(this.timing.voiceStart * 1000)) {
-      if (!first && this.muted) await chat.setVoiceMicMuted(true).catch(() => false);
-      await this.waitForVoiceReady();
-      return;
-    }
     const phase = this.stateView.phase;
     await this.waitForUser(
       first
-        ? { id: 'open-voice', label: 'Open Voice', text: "I couldn't start ChatGPT Voice automatically." }
-        : { id: 'resume-voice', label: 'Resume Voice', text: 'ChatGPT Voice closed.' },
+        ? { id: 'open-voice', label: 'Open Voice', text: 'Start ChatGPT Voice yourself, then return here.' }
+        : { id: 'resume-voice', label: 'Resume Voice', text: 'ChatGPT Voice closed. Open it yourself to continue.' },
       () => chat.isVoiceModeActive(),
-      () => chat.startVoice(this.timing.voiceStart * 1000),
+      async () => chat.isVoiceModeActive(),
     );
     this.set({ phase });
     if (!first && this.muted) await chat.setVoiceMicMuted(true).catch(() => false);
