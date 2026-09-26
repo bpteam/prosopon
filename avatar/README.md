@@ -66,7 +66,8 @@ src/
 │   ├── UserReactionMapper.ts   UserVoiceFrame → bounded UserReactionFrame (a ReactionSource)
 │   ├── EmotionChannels.ts      two EmotionFrame followers (user, assistant) = the EmotionSource
 │   ├── EmotionExpression.ts    emotion inputs/expression contracts
-│   ├── gesture/                Gesture.ts (contracts), GestureConfig.ts, GestureEngine.ts
+│   ├── gesture/                Gesture.ts (contracts), GestureConfig.ts, GestureEngine.ts,
+│   │                           SemanticGestureConfig.ts, SemanticGesturePolicy.ts (intent → gesture decision)
 │   └── AvatarDebugPanel.ts     lil-gui, talks only to AvatarController
 ├── audio/
 │   ├── AudioInput.ts           file / mic / test signal / external node / MediaStream → AnalyserNode
@@ -82,8 +83,18 @@ src/
 │   ├── emotion/                EmotionFrame, ProsodyEmotionAnalyzer, EmotionModel, EmotionModelHost, OnnxEmotionModel
 │   ├── LipSyncDebugPanel.ts    "Lip Sync" GUI folder
 │   └── VisemeDebugPanel.ts     "Visemes" GUI subfolder
+├── semantic/                   reply text → SemanticCue/SemanticIntent (renderer-, audio- and DOM-free)
+│   ├── SemanticCue.ts          contracts: cue types, SemanticCue, SemanticIntent, CUE_RANK
+│   ├── SemanticText.ts         normalisation, segmentation (paragraph / item / sentence / clause), script hint
+│   ├── SemanticRuleSet.ts      rules → token trie (compiled once), tokenizer, counts
+│   ├── SemanticMatcher.ts      per segment: matches, scoring, negation, overlaps, structure, aggregation
+│   ├── SemanticAnalyzer.ts     streaming: growing text → new intents, once per segment/type
+│   ├── SemanticPacer.ts        text clock: releases intents at the estimated spoken position
+│   ├── SemanticConfig.ts       thresholds, tier weights, structural signals
+│   ├── rules/                  vocabulary as data: RuleData.ts + en.ts, ru.ts, uk.ts, es.ts
+│   └── demoReplies.ts          long RU/UK/EN/ES replies for the sandbox and tests
 ├── vendor/headaudio/           HeadAudio main-thread module (not on npm; see its README)
-└── debug/                      DebugOverlay, FpsMeter, EmotionDebugPanel, GestureDebugPanel
+└── debug/                      DebugOverlay, FpsMeter, EmotionDebugPanel, GestureDebugPanel, SemanticDebugPanel
 ```
 
 Frame order: `delta → controller.update(delta) → renderer.render()`, where `controller.update` is
@@ -259,15 +270,61 @@ format documented on `parseModelSpec` in `audio/emotion/EmotionModel.ts`). Proce
   per-state rates; emotion compression; nod rules) and `GESTURE_LIMITS`.
 - `GestureEngine`: one primary gesture at a time, `prepare → attack → hold → release`, randomised cooldown, Poisson
   rates per state scaled by the assistant's arousal/intonation while speaking, repeat penalty, priorities
-  (forced/debug > boundary > speaking emphasis > ambient). Cancel and interruption release in 150–200 ms. Hand
+  (forced/debug > boundary > semantic > speaking emphasis > ambient). `head-shake` and `lean-in` have rate 0 in
+  every state: only semantic intents or `trigger()` start them. Cancel and interruption release in 150–200 ms. Hand
   emphasis is scheduled only while the assistant speaks, never while the user speaks.
 - Nods: after a finished user utterance (`utteranceEnds` from the reaction source); double nods key on user arousal
   (valence counts only at `valenceConfidence ≥ 0.5`). Without a reaction source (sandbox), utterance ends are derived
   from `emotion.user.active`.
 
+### Semantic intents
+
+`engine.pushSemantic(intent)` queues a `SemanticIntent` (from `avatar/src/semantic/`); the next `update()` asks
+`engine.semantic` (`SemanticGesturePolicy`) for a decision. The policy never throws into the engine: an exception
+switches the semantic path off (`semanticStatus.error`) and procedural gestures continue.
+
+- One decision per segment (early and final emissions of a segment share it); intents older than `maxAge` (4 s)
+  are stale.
+- Skip reasons, in order: `disabled`, `segment-done`, `stale`, `low-confidence`, `user-speaking`, `state`
+  (listening), `cooldown` (global 2.5 s), `type-cooldown` (6 s per cue type), `active-gesture`, `no-gesture`,
+  `probability`.
+- Primary cue by `CUE_RANK` (disagreement, agreement, question, enumeration, conclusion, contrast); emphasis only
+  raises chance and intensity; modifiers (example, cause, clarification) favour the hand.
+- `p = probabilityScale × base × confidence × (0.7 + 0.3·strength) × stateFactor × (1 + 0.35·emphasis) × prosody ×
+  repetition`, capped at 0.95. `stateFactor`: speaking 1, idle 0.5, thinking 0.25, listening 0. Prosody:
+  0.85–1.15 from the assistant's arousal. Repetition: ×0.5 when the same cue type decided last.
+- Mapping and weights: `SEMANTIC_GESTURE_CONFIG.cues` (see [PRODUCT.md §5.11](../PRODUCT.md#511-semantic-performance-layer)).
+  Enumeration and contrast alternate sides.
+- While intents are recent (`ambientWindow`, 8 s) the speaking ambient rate is × `ambientRateScale` (0.5).
+- History: `engine.semantic.history` (last 16 decisions), `engine.semanticStatus` (counts, queue, error).
+
 GUI **Gestures**: Enabled / Auto, readouts (current, phase, progress, intensity, cooldown), a button per gesture,
 Cancel, amplitude sliders, *copy settings*. `?gestureSeed=N` seeds the scheduler. Tuning:
 [../docs/gesture-calibration.md](../docs/gesture-calibration.md).
+
+## Semantic analyzer
+
+`new SemanticAnalyzer().update(messageId, text, complete)` takes the whole reply text so far (light Markdown:
+`1.`/`-` items, `#` headings, `**bold**`, code fences) and returns the intents that became known: a segment is
+emitted when its end is seen (or the reply is `complete`), or early when a strong/medium marker at its start is
+followed by punctuation (≥ 0.75 confidence, or a list item, or `¿`). Each segment emits at most once early and once
+final, each cue type once; a new `messageId` resets. Ids are `messageId#ordinal[:type]`, stable under re-rendering.
+
+Rules are data (`rules/*.ts`): groups of phrases with `kind` (a cue, a modifier or `none`), `tier`
+(strong/medium/weak → 0.92/0.78/0.5 confidence), `position` (`segment-start`, `clause-start`, `standalone` — must be
+followed by punctuation other than `?` — or `any`), `negatable`. Phrases are lower case, `ё` → `е`, `'` for
+apostrophes, a trailing `*` makes a stem. Longest match wins (words, then span, then position specificity);
+`none` rules swallow false friends. A negator in the two preceding words of the clause rejects a negatable rule;
+markers inside short quotes are mentions and are ignored. Scoring adds position and punctuation bonuses; a cue is
+emitted at ≥ 0.55 aggregated confidence (noisy-OR per type) with at least one marker ≥ 0.5, so weak markers alone
+never fire. Agreement vs disagreement: the earlier one in the segment wins.
+
+Rule counts: `defaultRuleSet().counts` (by kind and locale; enumeration split into intro/item/final).
+`SemanticPacer` (text clock) is described in [PRODUCT.md §5.11](../PRODUCT.md#511-semantic-performance-layer).
+
+GUI **Semantic**: demo reply (RU/UK/EN/ES), text arrival rate, speech rate, *Follow speech*, *Semantic gestures*,
+*Chance ×*, *Cooldown*, *Play* / *Stop*, readouts (segment, cues, decision, cues / intents / gestures). It sets the
+state to speaking without audio (the mouth stays closed).
 
 ## Pose layering
 
@@ -295,6 +352,7 @@ emotion, emotionPanel, gesture, state }`.
 
 - `state` is a live getter; `controller` and `state` exist before the model loads; `avatar` is `null` until then.
 - `gesture`: `engine`, `current`, `trigger(type, intensity?)`, `cancel()`, `enabled`, `auto`, `seed(n | null)`.
+- `semantic`: the Semantic panel (`play(locale)`, `stop()`, `pacer`), decisions in `gesture.engine.semantic.history`.
 - `<body data-avatar-loaded>` goes `false` → `true`, or `error` (with `data-avatar-error`). `<body data-avatar-state>`
   mirrors the conversation state from the start. Load errors also go to `console.error` and a banner on the page.
 
@@ -307,9 +365,15 @@ HMR: `main.ts` self-accepts and disposes the loop, renderer, GUI and overlay. Th
 - Unit (`tests/unit/`): camera presets (fill, centring, ordering, lens shift, clamping, degenerate bounds, pixel
   budget), loader/avatar layering (`fakeVrm.ts`), controller and state machine, idle timing at
   30/60/120 FPS, amplitude and viseme lip sync, `AudioInput`, `LipSyncFrame`, user voice (VAD, pitch, baseline on
-  synthetic signals), reactions, emotion analyser and mixer, `OnnxEmotionModel` (with an injected runtime), gestures.
+  synthetic signals), reactions, emotion analyser and mixer, `OnnxEmotionModel` (with an injected runtime), gestures,
+  semantic analyzer (`Semantic.test.ts`: vocabulary size and hygiene, table-driven positives per type × language,
+  critical false positives, multi-cue and conflicts from `semanticFixtures.ts`, segmentation, streaming = whole-text,
+  performance) and semantic gestures (`SemanticGesture.test.ts`: policy skips, cooldowns, repetition, fail-soft,
+  new gesture limits, density of a long multilingual reply).
 - Architecture (`tests/unit/architecture.test.ts`): gesture code imports no renderer types; only `Avatar`,
-  `AvatarController` and the debug panel touch bones; behaviour sources don't import `Avatar`; one nod implementation.
+  `AvatarController` and the debug panel touch bones; behaviour sources don't import `Avatar`; one nod implementation;
+  `semantic/` imports nothing outside itself and uses no DOM/audio/pose API; the gesture side imports only
+  `SemanticCue` from it.
 - E2E (`tests/e2e/`): smoke (load, state), lip sync (fake capture device, analysers, fallback), emotion, gestures.
   `tests/fixtures/loudness-probe.onnx` is a plumbing fixture, not an emotion model.
 

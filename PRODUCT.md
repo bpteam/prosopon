@@ -20,8 +20,10 @@ Prosopon is a browser-based real-time VRM avatar for voice AI. Today it ships as
 replaces the ChatGPT Voice orb on `chatgpt.com` with an animated VRM character.
 
 The avatar reacts to assistant speech (lip sync, prosody), user speech (voice activity, prosody), conversation state,
-procedural idle behaviour and procedural gestures, optionally refined by a local emotion ML model.
-**No speech-to-text is involved**: every signal is acoustic.
+procedural idle behaviour and procedural gestures, optionally refined by a local emotion ML model. Occasional
+semantic accents (a head tilt on a question, a shake on "not quite", a hand beat on a list item) come from local
+rules over the assistant's reply **text as ChatGPT displays it**.
+**No speech-to-text is involved**: audio signals are acoustic only; the only text read is the reply on the page.
 
 Intended experience:
 
@@ -62,6 +64,8 @@ User audio ───────┼─ user reaction (UserReactionMapper → Rea
 Assistant audio ──┼─ assistant emotion ┴─ EmotionChannels (EmotionSource)
                   ├─ lip sync (MouthSource)
                   └─ gestures (GestureEngine → GestureSource)
+                              ↑ pushSemantic(SemanticIntent)
+Reply text (DOM) ─ ChatGPTAdapter → SemanticFeed ─ SemanticAnalyzer → SemanticPacer
                               ↓
                         BehaviorMixer            (the only composition point)
                               ↓
@@ -76,8 +80,9 @@ Per frame (one `requestAnimationFrame` loop, delta clamped to 0.1 s):
 `state transition → idle → mouth → reaction → emotion → gesture → BehaviorMixer.compose → avatar.setProcedural →
 avatar.update → render`.
 
-ChatGPT is one integration around this core. New inputs (another voice provider, camera tracking, semantic hints)
-must enter as another typed source into `BehaviorMixer`, never as another writer of bones or expressions.
+ChatGPT is one integration around this core. New inputs (another voice provider, camera tracking) must enter as
+another typed source into `BehaviorMixer`, never as another writer of bones or expressions. Semantic cues are not a
+source of pose at all: they are *intents* that `GestureEngine` may turn into a gesture of its own vocabulary.
 
 ## 4. Architectural invariants
 
@@ -105,7 +110,8 @@ Rules marked *(tested)* are enforced by `avatar/tests/unit/architecture.test.ts`
    counter, `lastUtteranceDuration`); it does not animate the head.
 9. **React, don't mirror.** User energy, pitch and emotion map to bounded attentiveness (`REACTION_LIMITS`, emotion
    mix bounds), never copied onto the avatar.
-10. **No hidden STT.** Nothing in lip sync, state, prosody, emotion or gestures depends on transcription.
+10. **No hidden STT.** Nothing in lip sync, state, prosody, emotion or gestures depends on transcription. The
+    semantic layer reads the reply text ChatGPT renders; it never transcribes audio.
 11. **Assistant and user audio are never mixed before analysis.** Tab capture and microphone are separate pipelines.
 12. **No microphone feedback path.** The mic is never connected to `AudioContext.destination`; the user-voice worklet
     node has zero outputs (checked in `UserVoicePipeline.link()`).
@@ -125,7 +131,13 @@ Rules marked *(tested)* are enforced by `avatar/tests/unit/architecture.test.ts`
     (`AvatarStage.setCameraPreset`, `setPresentation`, `AvatarController.getBehaviorSnapshot`, …). `ManualControls`
     is the only extension file that writes the manual layer. Wrong: debug panel → VRM bone, popup → Three.js,
     emotion button → `expressionManager`, UI → private camera fields.
-18. **Developer Mode off costs nothing** *(tested)*. With `prosopon.developerMode` false no Dev UI chunk is loaded, no
+18. **Semantics are signals, not animation** *(tested)*. `avatar/src/semantic/**` (text → `SemanticCue`/`SemanticIntent`)
+    imports nothing outside itself: no avatar, renderer, audio, three, VRM, DOM or packages. The gesture side reads
+    only `SemanticCue.ts`; `SemanticGesturePolicy` inside `GestureEngine` decides (and may decline) every gesture.
+    Reply text reaches the analyzer only through `ChatGPTAdapter.readLatestReply()`; `SemanticFeed` has no DOM
+    access. Semantics never touch lip sync, expressions or the conversation state, and the user interrupting always
+    wins over them.
+19. **Developer Mode off costs nothing** *(tested)*. With `prosopon.developerMode` false no Dev UI chunk is loaded, no
     history, charts, observers, telemetry or windows exist; the UI never runs its own `requestAnimationFrame` or
     `setInterval` (sampling is driven by the render loop).
 
@@ -238,14 +250,47 @@ attentive reaction.
 ### 5.10 Gestures
 
 `avatar/src/avatar/gesture/`: `Gesture.ts` (contracts), `GestureConfig.ts` (amplitudes, rates, limits),
-`GestureEngine.ts`. Types: nod, double nod, head tilt, body shift, shoulder shift, hand emphasis. One primary gesture
-at a time; lifecycle `prepare → attack → hold → release`; Poisson rates per state (frame-rate independent),
-modulated by the assistant's arousal while speaking; randomised cooldown; repeat penalty. Priority:
-forced/debug > boundary (nod after a user utterance) > speaking emphasis > ambient. Interruption or cancel releases
+`GestureEngine.ts`, `SemanticGestureConfig.ts` + `SemanticGesturePolicy.ts` (5.11). Types: nod, double nod, head
+tilt, head shake, lean in, body shift, shoulder shift, hand emphasis (head shake and lean in have rate 0: semantic
+or manual only). One primary gesture at a time; lifecycle `prepare → attack → hold → release`; Poisson rates per
+state (frame-rate independent), modulated by the assistant's arousal while speaking; randomised cooldown; repeat
+penalty. Priority: forced/debug > boundary (nod after a user utterance) > semantic > speaking emphasis > ambient. Interruption or cancel releases
 in 150–200 ms, never snaps. Hand emphasis is scheduled only while the assistant speaks and never while the user
 speaks. Missing bones are skipped (no shoulders → shoulder shift becomes a chest roll).
 
-### 5.11 Chrome extension runtime
+### 5.11 Semantic performance layer
+
+Reply text → `SemanticCue[]` → gesture decision. Cues are signals; "no gesture" is a normal outcome.
+
+- **Analyzer** (`avatar/src/semantic/`, renderer-free): `SemanticAnalyzer.update(messageId, text, complete)` on the
+  growing reply text. Segmentation into paragraph / list item / sentence / clause (fenced code skipped); a token trie
+  of ~3 000 rules from data files (`rules/en|ru|uk|es.ts`; compiled once, ~20 ms) with multi-word precedence,
+  Unicode word boundaries, positions (segment start, clause start, standalone, anywhere), tiers strong/medium/weak,
+  negation rejection, `none` rules that swallow false friends ("не только… но и", "right now", "sino también"),
+  quoted mentions ignored, a script hint between RU and UK. Structural signals: `?`/`¿`, numbered and bulleted items,
+  a list intro ending with `:`, headings, bold, caps. Per segment the matches aggregate (noisy-OR) into at most one
+  cue per type: question, enumeration (intro/item/final), contrast, conclusion, agreement, disagreement, emphasis;
+  plus modifiers (example, cause, clarification). Streaming: a segment is emitted once its end is seen, or early
+  when a strong marker opens it; each segment/type is emitted once, so a re-rendered or re-read reply yields no
+  duplicates.
+- **Pacer** (`SemanticPacer`): in a voice session the reply text arrives faster than it is spoken, so intents are
+  released when the estimated spoken position (assistant audio seconds × 14 chars/s) reaches them, and dropped when
+  3 s late. In text chat intents go out as they arrive. Inputs are two booleans per frame; no audio data.
+- **Policy** (`SemanticGesturePolicy`, in `GestureEngine`): one decision per segment; skipped (with a logged
+  reason) when disabled, stale, low confidence, the user is speaking, state is listening, global (2.5 s) or per-type
+  (6 s) cooldown, a gesture of equal or higher priority runs. Otherwise one primary cue (disagreement > agreement >
+  question > enumeration > conclusion > contrast; emphasis only boosts) and a roll of
+  `base × confidence × strength × state × emphasis × prosody × repetition`. Mapping: agreement → nod / double nod;
+  disagreement → head shake / tilt; question → head tilt / lean in; contrast → body or shoulder shift, tilt, hand
+  (alternating side); enumeration → hand beat (alternating side) / body shift; conclusion → lean in / nod / hand;
+  emphasis → hand / lean in / nod. While semantic intents are recent the ambient speaking rate is halved, so
+  semantics replace rather than add motion. A long reply yields roughly one gesture per four to five cues.
+- **Integration** (extension): `ChatGPTAdapter.readLatestReply()` renders the latest assistant message to light
+  Markdown (lists, headings, bold; code blocks emptied); `SemanticFeed` reads it after DOM mutations at most every
+  125 ms, ignores the reply that was on the page at activation, completes a reply after 2.5 s without change and
+  switches itself off on any error. Sandbox: *Semantic* GUI folder plays demo replies (RU/UK/EN/ES).
+
+### 5.12 Chrome extension runtime
 
 MV3, Chrome 116+, active only on `https://chatgpt.com/*`.
 
@@ -253,7 +298,7 @@ MV3, Chrome 116+, active only on `https://chatgpt.com/*`.
 |---|---|---|
 | service worker | per-tab enable state (`TabSessions`), `tabCapture` stream ids, offscreen lifecycle, mic opt-in, emotion model installer, message routing | DOM, audio analysis, Three.js |
 | offscreen document | tab + mic `MediaStream`s, AudioContexts, worklets, lip sync, VAD, pitch, prosody, model inference | Three.js, VRM, Avatar, ChatGPT DOM |
-| content script | `ChatGPTAdapter`, `AvatarOverlay` (full-viewport, click-through shadow root), `UiLayer` (in-page UI shadow root), `AvatarController`, `ConversationSignalResolver`, `FrameMouthSource`, Developer Mode (lazy chunk) | audio nodes, PCM, streams |
+| content script | `ChatGPTAdapter`, `AvatarOverlay` (full-viewport, click-through shadow root), `UiLayer` (in-page UI shadow root), `AvatarController`, `ConversationSignalResolver`, `FrameMouthSource`, `SemanticFeed` (reply text → gesture intents), Developer Mode (lazy chunk) | audio nodes, PCM, streams |
 | popup | avatar on/off, microphone reactions, avatar layout (preset, size, *Move avatar*), emotion model install/enable/disable/remove, Developer mode switch | analysis, rendering, Three.js |
 | permission page | one-time microphone grant for the extension origin | analysis |
 
@@ -293,19 +338,21 @@ Permissions: `tabCapture`, `offscreen`, `scripting` (re-inject into open tabs af
 (mic opt-in), `storage` (mic opt-in in `session`; model metadata, layout and Developer Mode in `local`); hosts `https://chatgpt.com/*`,
 `https://huggingface.co/*` (model download). CSP `script-src 'self' 'wasm-unsafe-eval'` for ONNX Runtime WASM.
 
-### 5.12 Privacy
+### 5.13 Privacy
 
-Tab audio, microphone audio and model inference are processed locally; raw audio is not uploaded or recorded. The
-only network request Prosopon makes is the one-time pinned model download (none in the embedded build).
+Tab audio, microphone audio, model inference and reply-text analysis are processed locally; raw audio and text are
+not uploaded, recorded or stored. The only network request Prosopon makes is the one-time pinned model download
+(none in the embedded build).
 
-### 5.13 Development tooling
+### 5.14 Development tooling
 
-- Sandbox (`avatar/`, `npm run dev`): lil-gui panels (Avatar, Lip Sync / Visemes, Emotion / Prosody, Gestures),
+- Sandbox (`avatar/`, `npm run dev`): lil-gui panels (Avatar, Lip Sync / Visemes, Emotion / Prosody, Gestures, Semantic),
   debug overlay, `window.__AVATAR_DEBUG__`, URL params `?analyzer=` and `?gestureSeed=`.
-- Extension Developer mode (every build, off by default): Debug HUD, Developer Tools, Avatar Controls, quick
-  toolbar; no lil-gui in the extension.
+- Extension Developer mode (every build, off by default): Debug HUD, Developer Tools (incl. a *Semantic* tab:
+  segments, cues, decisions with skip reasons), Avatar Controls, quick toolbar; no lil-gui in the extension.
 - Extension development builds: diagnostics `data-*` attributes on the overlay host, `window.__PROSOPON_DEBUG__`
-  (content-script world), page events `prosopon:debug` / `prosopon:gesture` / `prosopon:emotion`, service-worker E2E
+  (content-script world), page events `prosopon:debug` / `prosopon:gesture` / `prosopon:emotion` /
+  `prosopon:semantic`, service-worker E2E
   hook. None exist in production builds.
 - Tests: Vitest unit + architecture tests in both packages; Playwright E2E for the sandbox and for the unpacked
   extension (real tab capture, fake microphone, WebGPU via SwiftShader).
@@ -321,6 +368,9 @@ Debug APIs are development-only and must not become runtime dependencies.
 | Resolver timings | `ConversationSignalResolver` config | see 5.4 |
 | Emotion analyser / mix | `DEFAULT_PROSODY_EMOTION_CONFIG`, `DEFAULT_EMOTION_MIX` | subtle, synthetic-tuned |
 | Gesture amplitudes / rates | `GESTURE_CONFIG` | reasoned, not visually tuned |
+| Semantic vocabulary / thresholds | `avatar/src/semantic/rules/*.ts`, `SEMANTIC_CONFIG` | hand-written examples only |
+| Semantic → gesture mapping, chances, cooldowns | `SEMANTIC_GESTURE_CONFIG` | reasoned, not visually tuned |
+| Speech rate of the text clock | `SEMANTIC_PACER_CONFIG.charsPerSecond` | 14 chars/s (estimate) |
 | Embedded model build | `PROSOPON_EMBED_MODEL=1` (`build:extension:embedded`) | off |
 | Docker file watching | `WATCH_POLLING=true` | off |
 
@@ -352,6 +402,12 @@ Debug APIs are development-only and must not become runtime dependencies.
   chatgpt.com DOM are not covered by E2E.
 - **Layout on real ChatGPT.** The full-viewport overlay, the default Waist placement and the dev windows are E2E-
   tested on a fixture page only; how they sit next to ChatGPT's real composer and sidebar is a manual check.
+- **Semantic layer on real ChatGPT.** The assistant-message selector (`data-message-author-role="assistant"`) and
+  whether voice mode renders the reply text while it speaks are unverified against production; if not, semantics
+  stay silent in voice mode (text chat still works). Timing is a text-clock estimate (fixed chars/s, no alignment):
+  an accent can land a second early or late. The vocabulary is validated on hand-written ChatGPT-style replies, not
+  on real ones; rule-based cues miss irony, implicit contrast and anything not in the lists. No brow accent. Manual
+  checks: [docs/semantic-calibration.md](docs/semantic-calibration.md).
 - **Layout is global.** One layout for every ChatGPT tab and window size; positions are normalized, so a very
   different aspect ratio can put the avatar over page content until it is moved.
 
@@ -360,8 +416,8 @@ Debug APIs are development-only and must not become runtime dependencies.
 Do not assume these exist:
 
 - camera / visual tracking (MediaPipe, face landmarks, user smile, head pose, gaze);
-- semantic understanding (transcripts, text sentiment, LLM intent, semantic emphasis);
-- semantic gestures (pointing, sizing, counting);
+- deeper semantic understanding (transcripts, text sentiment, LLM or ML NLP intent, word-level audio alignment);
+- iconic/deictic gestures (pointing, sizing, finger counting, direction);
 - full-body generative motion (motion diffusion, motion matching, mocap generation);
 - custom echo cancellation;
 - speaker identification / diarization;
@@ -376,8 +432,8 @@ Do not assume these exist:
 - Camera reaction layer: `camera → MediaPipe → user visual state → ReactionSource → BehaviorMixer`, never wired to
   VRM directly.
 - Better multilingual lip sync (another analyser behind `VisemeAnalyzer`, not a second pipeline).
-- Semantic gesture hints (agreement, question, emphasis, enumeration, direction, size) as another input to
-  `GestureEngine`.
+- Semantic layer: word-level timing from audio onsets instead of a fixed speech rate; brow accents; iconic gestures
+  (direction, size, counting); vocabulary tuned on real replies.
 - Smaller/faster emotion model and ORT footprint.
 - Web Store productionisation: privacy copy, permission audit, icons, versioning, store package, model distribution
   policy, release CI.

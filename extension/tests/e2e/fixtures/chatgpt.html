@@ -63,6 +63,40 @@
             if (i % 3 === 0) p.remove();
           }
         },
+        /**
+         * An assistant reply as chatgpt.com renders it (unverified against production, see
+         * docs/semantic-calibration.md): an element with data-message-author-role="assistant" and a .markdown body,
+         * streamed as text tokens every `ms`. Resolves when the whole text is on the page.
+         */
+        streamReply(id, paragraphs, ms = 20) {
+          const message = document.createElement('div');
+          message.dataset.messageAuthorRole = 'assistant';
+          message.dataset.messageId = id;
+          const body = document.createElement('div');
+          body.className = 'markdown prose';
+          message.append(body);
+          document.getElementById('thread').append(message);
+          const tokens = paragraphs.map((p) => p.match(/\S+\s*/g) ?? []);
+          return new Promise((resolve) => {
+            let para = -1;
+            let i = 0;
+            let node = null;
+            const step = () => {
+              if (!node || i >= tokens[para].length) {
+                para++;
+                i = 0;
+                if (para >= tokens.length) return resolve();
+                const p = document.createElement('p');
+                node = document.createTextNode('');
+                p.append(node);
+                body.append(p);
+              }
+              node.data += tokens[para][i++];
+              setTimeout(step, ms);
+            };
+            step();
+          });
+        },
         /** SPA navigation: pushState + re-render of the app shell. */
         navigate(path) {
           history.pushState({}, '', path);
