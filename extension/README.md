@@ -15,6 +15,28 @@ npm run build            # → extension/dist
 click the Prosopon toolbar button. Click again to disable. The badge shows `ON`, `…` (starting) or `!` (error, the
 tooltip says why; click to retry).
 
+### Docker
+
+Without a local Node: `compose.yaml` in the repo root has an `extension` service (profile `extension`) and an
+`extension-e2e` service (profile `test`). Both bind-mount `avatar/` and `extension/`, so `extension/dist` appears
+on the host and is loaded unpacked from there. `node_modules` of both packages live in named volumes and are
+reinstalled by the entrypoint when a `package-lock.json` changes.
+
+```bash
+docker compose run --rm extension                      # production build → extension/dist
+docker compose run --rm extension npm run dev          # development build, rebuilt on change
+WATCH_POLLING=true docker compose run --rm extension npm run dev   # when edits aren't picked up (Docker Desktop on Windows)
+docker compose run --rm extension npm test             # unit tests
+docker compose --profile test run --rm extension-e2e   # E2E in mcr.microsoft.com/playwright (Chromium + tab capture)
+```
+
+- Build context is the repo root (the extension compiles `avatar/src`); `extension/Dockerfile.dockerignore` limits
+  it to the lockfiles.
+- `extension-e2e` rebuilds `extension/dist` in development mode: run the production build again before loading it
+  in Chrome for real use.
+- Containers run as uid 1000 (like the avatar services); with another host uid, `extension/dist` gets the wrong owner.
+- The Playwright image tag in `extension/Dockerfile` must match `@playwright/test` in `extension/package-lock.json`.
+
 Development: `npm run dev` rebuilds on change (`--mode development`: diagnostics panel over the avatar, E2E hook in
 the service worker). Content scripts have no HMR: after a rebuild, reload the extension and the ChatGPT tab. The
 old content script notices its dead runtime and removes itself, so no duplicate overlays.

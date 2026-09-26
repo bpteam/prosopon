@@ -26,6 +26,47 @@ services:
       - ./avatar:/app
       - e2e_node_modules:/app/node_modules
 
+  # Chrome extension. Builds into extension/dist on the host (bind mount); load that folder unpacked in Chrome.
+  #   docker compose run --rm extension                  production build
+  #   docker compose run --rm extension npm run dev      development build, rebuilt on change
+  #   docker compose run --rm extension npm test         unit tests
+  extension:
+    profiles: [extension]
+    build:
+      # Repo root: the extension compiles Avatar Core from avatar/src (see extension/Dockerfile).
+      context: .
+      dockerfile: extension/Dockerfile
+      target: build
+    environment:
+      WATCH_POLLING: ${WATCH_POLLING:-false}
+    volumes:
+      - ./avatar:/repo/avatar
+      - ./extension:/repo/extension
+      - extension_avatar_node_modules:/repo/avatar/node_modules
+      - extension_node_modules:/repo/extension/node_modules
+
+  # Extension E2E: development build + Chromium with the unpacked extension and real tab capture.
+  #   docker compose --profile test run --rm extension-e2e
+  extension-e2e:
+    profiles: [test]
+    build:
+      context: .
+      dockerfile: extension/Dockerfile
+      target: e2e
+    ipc: host
+    environment:
+      CI: ${CI:-}
+    volumes:
+      - ./avatar:/repo/avatar
+      - ./extension:/repo/extension
+      - extension_e2e_avatar_node_modules:/repo/avatar/node_modules
+      - extension_e2e_node_modules:/repo/extension/node_modules
+
 volumes:
   avatar_node_modules:
   e2e_node_modules:
+  # Separate from the avatar services' volumes: each set is (re)installed by its own entrypoint.
+  extension_avatar_node_modules:
+  extension_node_modules:
+  extension_e2e_avatar_node_modules:
+  extension_e2e_node_modules:

@@ -15,7 +15,12 @@ const avatarRoot = resolve(root, '../avatar');
 const outDir = resolve(root, 'dist');
 const args = process.argv.slice(2);
 const mode = args.includes('--mode') ? args[args.indexOf('--mode') + 1] : 'production';
-const watch = args.includes('--watch') ? {} : null;
+// WATCH_POLLING=true: file events don't cross some bind mounts (Docker Desktop on Windows, network FS).
+const watch = args.includes('--watch')
+  ? process.env.WATCH_POLLING === 'true'
+    ? { watcher: { usePolling: true, pollInterval: 300 } }
+    : {}
+  : null;
 const dev = mode === 'development';
 // import.meta.env.DEV follows NODE_ENV, not --mode: development builds carry the diagnostics and the E2E hook.
 process.env.NODE_ENV = dev ? 'development' : 'production';

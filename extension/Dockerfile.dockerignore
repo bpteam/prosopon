@@ -1,0 +1,7 @@
+# Context is the repo root; the image only needs lockfiles and the entrypoint.
+**
+!avatar/package.json
+!avatar/package-lock.json
+!extension/package.json
+!extension/package-lock.json
+!extension/docker/entrypoint.sh
