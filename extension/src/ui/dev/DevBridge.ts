@@ -6,6 +6,7 @@ import type { MouthShape } from '@avatar/avatar/MouthShape';
 import type { EmotionChannel, EmotionFrame } from '@avatar/audio/emotion/EmotionFrame';
 import type { UserVoiceFrame } from '@avatar/audio/user/UserVoiceFrame';
 import type { GestureType } from '@avatar/avatar/gesture/Gesture';
+import type { EnumerationRole, SemanticCueType } from '@avatar/semantic/SemanticCue';
 import type { CameraAdjust, CameraPreset } from '@avatar/renderer/CameraFraming';
 import type { SceneHelpers } from '@avatar/renderer/AvatarStage';
 import type { DevTelemetry, EmotionStatus, MicStatus } from '../../shared/messages';
@@ -51,6 +52,7 @@ export interface DevSample {
     enabled: boolean;
   };
   render: { fps: number; frameMs: number; drawCalls: number; triangles: number; pixelRatio: number; memoryMb: number | null };
+  semantic: SemanticDevSample;
   /** Offscreen telemetry (audio contexts, inference time); null until the first arrives. */
   telemetry: DevTelemetry | null;
 }
@@ -124,8 +126,47 @@ export interface DevBridge {
     setEnabled(on: boolean): void;
   };
 
+  /** Semantic layer: reply text → cues → (maybe) gestures. */
+  readonly semantic: {
+    setEnabled(on: boolean): void;
+    /** Text clock (voice mode) on/off. */
+    setPacing(on: boolean): void;
+    /** Multiplier of every semantic gesture chance (0 = none, debug tuning). */
+    setProbabilityScale(value: number): void;
+  };
+
   /** Ask the offscreen document for telemetry (only while Developer Mode is on). */
   setTelemetry(enabled: boolean): void;
+}
+
+/** Semantic diagnostics: analyser and pacer counters, and the last analysed segments with their decisions. */
+export interface SemanticDevSample {
+  /** The feed started (false: the semantic layer failed to start and is absent). */
+  available: boolean;
+  enabled: boolean;
+  error: string | null;
+  pacing: boolean;
+  mode: 'speech' | 'immediate';
+  spokenChars: number;
+  pending: number;
+  dropped: number;
+  messages: number;
+  segments: number;
+  cues: number;
+  intents: number;
+  accepted: number;
+  probabilityScale: number;
+  busyMs: number;
+  entries: {
+    segmentId: string;
+    text: string;
+    early: boolean;
+    cues: { type: SemanticCueType; role?: EnumerationRole; confidence: number; strength: number }[];
+    matches: { kind: string; marker: string; locale: string | null; tier: string; confidence: number }[];
+    modifiers: string[];
+    /** null: not decided yet (waiting for its moment in the speech). */
+    decision: { accepted: boolean; gesture: GestureType | null; reason: string | null; probability: number; cue: SemanticCueType | null; intensity: number } | null;
+  }[];
 }
 
 /** Manual pose controls of the Poses tab, degrees. Head rotation is separate (setHeadRotation). */

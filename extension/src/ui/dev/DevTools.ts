@@ -20,12 +20,13 @@ import {
   gesturePanel,
   hudPanel,
   overviewPanel,
+  semanticPanel,
   settingsTabPanel,
   type Panel,
 } from './panels';
 import { DEV_CSS, tabs, type Tabs } from './widgets';
 
-const DEVTOOLS_TABS = ['Overview', 'Audio', 'Emotion', 'Behavior', 'Gestures', 'Avatar', 'Settings'] as const;
+const DEVTOOLS_TABS = ['Overview', 'Audio', 'Emotion', 'Behavior', 'Gestures', 'Semantic', 'Avatar', 'Settings'] as const;
 const AVATAR_TABS = ['Camera', 'Expressions', 'Poses', 'Gestures', 'Scene'] as const;
 const TITLES: Record<DevWindowId, string> = { hud: 'Prosopon Debug', devtools: 'Prosopon Developer Tools', avatarControls: 'Avatar Controls' };
 
@@ -242,6 +243,8 @@ export class DevTools implements DevToolsHandle {
             return behaviorPanel(doc);
           case 'Gestures':
             return gesturePanel(doc, b, 'devtools');
+          case 'Semantic':
+            return semanticPanel(doc, b);
           case 'Avatar':
             return avatarTabPanel(doc, b, () => this.open('avatarControls'));
           default:

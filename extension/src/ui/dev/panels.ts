@@ -3,7 +3,7 @@ import { fmt, h, setText } from '../shared/dom';
 import { STORAGE_KEYS, isCameraModified } from '../../shared/settings';
 import type { DevBridge, DevSample } from './DevBridge';
 import type { DevHistory } from './History';
-import { STATE_COLORS, barRow, card, keyValue, metricChart, switchRow, type BarRow, type Chart, type KeyValue } from './widgets';
+import { STATE_COLORS, barRow, card, keyValue, metricChart, sliderRow, switchRow, type BarRow, type Chart, type KeyValue } from './widgets';
 
 /** A block of the developer UI that follows the 10 Hz samples. draw() repaints its charts (≤ 10 Hz, visible only). */
 export interface Panel {
@@ -347,6 +347,73 @@ export function gesturePanel(doc: Document, bridge: DevBridge, testPrefix: strin
       if (auto.input.checked !== g.auto) auto.input.checked = g.auto;
       if (enabled.input.checked !== g.enabled) enabled.input.checked = g.enabled;
       for (const b of triggers) b.disabled = !g.enabled;
+    },
+    draw() {},
+  };
+}
+
+/**
+ * Semantic tab: what the reply's text was read as (segment, markers with locale/tier/confidence, aggregated cues)
+ * and what the gesture side made of it (accepted gesture, or the skip reason). The list is rebuilt only when an
+ * entry or a decision changes.
+ */
+export function semanticPanel(doc: Document, bridge: DevBridge): Panel {
+  const kv = {
+    status: keyValue(doc, 'Status'),
+    timing: keyValue(doc, 'Timing'),
+    counts: keyValue(doc, 'Segments / cues'),
+    gestures: keyValue(doc, 'Intents → gestures'),
+    queue: keyValue(doc, 'Waiting / dropped'),
+    cost: keyValue(doc, 'Analysis time'),
+  };
+  const enabled = switchRow(doc, 'Semantic gestures', true, (on) => bridge.semantic.setEnabled(on));
+  const pacing = switchRow(doc, 'Follow speech (text clock)', true, (on) => bridge.semantic.setPacing(on));
+  const scale = sliderRow(doc, 'Chance ×', { min: 0, max: 4, step: 0.1 }, 1, (v) => v.toFixed(1), (v) => bridge.semantic.setProbabilityScale(v));
+  const list = h(doc, 'div', { class: 'sem-list', 'data-testid': 'semantic-entries' });
+  let signature = '';
+  return {
+    el: h(
+      doc,
+      'div',
+      { class: 'tab-panel' },
+      h(doc, 'div', { class: 'grid2' }, card(doc, 'Status', ...Object.values(kv).map((k) => k.el)), card(doc, 'Controls', enabled.el, pacing.el, scale.el)),
+      card(doc, 'Recent segments', list),
+    ),
+    update(s) {
+      const m = s.semantic;
+      kv.status.set(!m.available ? 'unavailable' : m.error ? `stopped: ${m.error}` : m.enabled ? 'on' : 'off');
+      kv.timing.set(m.mode === 'speech' ? `speech · ${Math.round(m.spokenChars)} chars spoken` : 'as text arrives');
+      kv.counts.set(`${m.segments} / ${m.cues}`);
+      kv.gestures.set(`${m.intents} → ${m.accepted}`);
+      kv.queue.set(`${m.pending} / ${m.dropped}`);
+      kv.cost.set(`${m.busyMs.toFixed(1)} ms`);
+      if (enabled.input.checked !== m.enabled) enabled.input.checked = m.enabled;
+      if (pacing.input.checked !== m.pacing) pacing.input.checked = m.pacing;
+      scale.set(m.probabilityScale);
+      const sig = m.entries.map((e) => `${e.segmentId}:${e.decision ? `${e.decision.accepted}${e.decision.reason}` : '-'}`).join('|');
+      if (sig === signature) return;
+      signature = sig;
+      list.replaceChildren(
+        ...[...m.entries].reverse().map((e) => {
+          const d = e.decision;
+          const verdict = !d ? 'waiting' : d.accepted ? `→ ${d.gesture} (p ${d.probability.toFixed(2)}, ×${d.intensity.toFixed(2)})` : `skipped: ${d.reason}${d.probability ? ` (p ${d.probability.toFixed(2)})` : ''}`;
+          return h(
+            doc,
+            'div',
+            { class: `sem-entry${d?.accepted ? ' accepted' : ''}`, 'data-testid': 'semantic-entry' },
+            h(doc, 'div', { class: 'sem-text' }, `${e.early ? '⚡ ' : ''}${e.text}`),
+            h(doc, 'div', { class: 'tiny mono' }, e.matches.map((x) => `"${x.marker}" → ${x.kind} / ${x.locale ?? 'structure'} / ${x.tier} / ${x.confidence.toFixed(2)}`).join('\n')),
+            h(
+              doc,
+              'div',
+              { class: 'tiny' },
+              e.cues.map((c) => `${c.type}${c.role ? `-${c.role}` : ''} ${c.confidence.toFixed(2)} (strength ${c.strength.toFixed(2)})`).join(' · ') +
+                (e.modifiers.length ? ` · ${e.modifiers.join(', ')}` : ''),
+            ),
+            h(doc, 'div', { class: 'tiny sem-verdict' }, verdict),
+          );
+        }),
+      );
     },
     draw() {},
   };

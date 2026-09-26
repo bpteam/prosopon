@@ -10,6 +10,8 @@ const LABELS: Record<GestureType, string> = {
   'body-shift': 'Body Shift',
   'shoulder-shift': 'Shoulder Shift',
   'hand-emphasis': 'Hand Emphasis',
+  'head-shake': 'Head Shake',
+  'lean-in': 'Lean In',
 };
 
 const AMPLITUDES = [

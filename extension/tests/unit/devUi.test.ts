@@ -50,6 +50,43 @@ function sample(): DevSample {
     },
     gesture: { type: null, phase: 'none', progress: 0, intensity: 0, cooldown: 0, count: 0, nods: 0, auto: true, enabled: true },
     render: { fps: 60, frameMs: 16.7, drawCalls: 12, triangles: 40000, pixelRatio: 1, memoryMb: null },
+    semantic: {
+      available: true,
+      enabled: true,
+      error: null,
+      pacing: true,
+      mode: 'speech',
+      spokenChars: 120,
+      pending: 1,
+      dropped: 0,
+      messages: 1,
+      segments: 6,
+      cues: 3,
+      intents: 3,
+      accepted: 1,
+      probabilityScale: 1,
+      busyMs: 0.8,
+      entries: [
+        {
+          segmentId: 'm#0',
+          text: 'Да, именно.',
+          early: true,
+          cues: [{ type: 'agreement', confidence: 1, strength: 0.8 }],
+          matches: [{ kind: 'agreement', marker: 'Да, именно', locale: 'ru', tier: 'strong', confidence: 1 }],
+          modifiers: [],
+          decision: { accepted: true, gesture: 'nod', reason: null, probability: 0.6, cue: 'agreement', intensity: 0.8 },
+        },
+        {
+          segmentId: 'm#1',
+          text: 'Но тут есть важный нюанс.',
+          early: false,
+          cues: [{ type: 'contrast', confidence: 0.92, strength: 1 }],
+          matches: [{ kind: 'contrast', marker: 'Но', locale: 'ru', tier: 'medium', confidence: 0.82 }],
+          modifiers: [],
+          decision: { accepted: false, gesture: null, reason: 'cooldown', probability: 0, cue: 'contrast', intensity: 0 },
+        },
+      ],
+    },
     telemetry: null,
   };
 }
@@ -111,6 +148,7 @@ function fakeBridge(doc: Document) {
     },
     emotion: { setEnabled: vi.fn() },
     gestures: { types: GESTURE_TYPES, trigger: vi.fn(() => true), cancel: vi.fn(), setAuto: vi.fn(), setEnabled: vi.fn() },
+    semantic: { setEnabled: vi.fn(), setPacing: vi.fn(), setProbabilityScale: vi.fn() },
     setTelemetry: (on) => void calls.telemetry.push(on),
   };
   return { bridge, layer, calls, get view() {

@@ -50,6 +50,7 @@ import { ManualControls } from '../ui/dev/ManualControls';
 import { AvatarOverlay } from './AvatarOverlay';
 import { ChatGPTAdapter, type ConversationUiAdapter, type VoiceUiSnapshot } from './ChatGPTAdapter';
 import { ConversationSignalResolver, type ConversationSignals } from './ConversationSignalResolver';
+import { SemanticFeed } from './SemanticFeed';
 
 /**
  * Avatar side of the content script, loaded on activation only (three.js + three-vrm stay off chatgpt.com until
@@ -65,6 +66,7 @@ import { ConversationSignalResolver, type ConversationSignals } from './Conversa
  *                                        └─ utterance ends ─► GestureEngine ─► (GestureSource) BehaviorMixer
  *   LipSyncFrame ─► FrameMouthSource ─► (MouthSource) BehaviorMixer      the mouth follows the assistant only
  *   EmotionFrame (user, assistant) ─► EmotionChannels ─► (EmotionSource) BehaviorMixer   face/body, never the mouth
+ *   ChatGPTAdapter (reply text) ─► SemanticFeed (analyser + text clock) ─► GestureEngine.pushSemantic
  */
 
 export interface AvatarRuntimeOptions {
@@ -128,6 +130,8 @@ export interface ProsoponDebug {
   /** Mapping bounds of the emotion layer; mutable for calibration. */
   emotionConfig: EmotionMixConfig;
   gesture: GestureEngine;
+  /** Semantic layer (reply text → intents); null if it failed to start. */
+  semantic: SemanticFeed | null;
   /** Camera API (presets, corrections, presentation). */
   stage: AvatarStage;
 }
@@ -170,6 +174,12 @@ const EMOTION_DEBUG_EVENT = 'prosopon:emotion';
  * trigger?: GestureType, cancel?: true }
  */
 const GESTURE_DEBUG_EVENT = 'prosopon:gesture';
+/**
+ * Semantic layer (development builds), e.g.
+ *   document.dispatchEvent(new CustomEvent('prosopon:semantic', { detail: { pacing: false, probabilityScale: 3 } }))
+ * detail: { enabled?: boolean, pacing?: boolean, probabilityScale?: number }
+ */
+const SEMANTIC_DEBUG_EVENT = 'prosopon:semantic';
 
 export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle {
   const doc = options.doc ?? document;
@@ -189,6 +199,17 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
   controller.setEmotionSource(emotion);
   const gestures = new GestureEngine();
   controller.setGestureSource(gestures);
+  // Semantic performance: the reply's text shapes gestures. Optional: if it cannot start, nothing else changes.
+  let semantic: SemanticFeed | null = null;
+  try {
+    semantic = new SemanticFeed({
+      source: adapter,
+      sink: (intent) => gestures.pushSemantic(intent),
+      onError: (error) => console.warn('[prosopon] semantic layer stopped; the avatar continues without it:', error),
+    });
+  } catch (error) {
+    console.warn('[prosopon] semantic layer unavailable:', error);
+  }
   /** Seconds since the last user voice frame; the user is not speaking once frames stop. */
   let userFrameAge = Infinity;
   const USER_FRAME_STALE = 0.5;
@@ -240,6 +261,20 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
   if (options.debug) {
     doc.addEventListener(EMOTION_DEBUG_EVENT, onEmotionDebug);
     doc.addEventListener(GESTURE_DEBUG_EVENT, onGestureDebug);
+    doc.addEventListener(SEMANTIC_DEBUG_EVENT, onSemanticDebug);
+  }
+  function setSemanticEnabled(on: boolean): void {
+    semantic?.setEnabled(on);
+    gestures.semantic.config.enabled = on && semantic !== null;
+  }
+  function onSemanticDebug(event: Event): void {
+    const d = (event as CustomEvent<Record<string, unknown> | null>).detail;
+    if (!d || typeof d !== 'object') return;
+    if (typeof d.enabled === 'boolean') setSemanticEnabled(d.enabled);
+    if (typeof d.pacing === 'boolean') semantic?.setPacing(d.pacing);
+    if (typeof d.probabilityScale === 'number' && Number.isFinite(d.probabilityScale)) {
+      gestures.semantic.config.probabilityScale = Math.max(0, d.probabilityScale);
+    }
   }
   function onGestureDebug(event: Event): void {
     const d = (event as CustomEvent<Record<string, unknown> | null>).detail;
@@ -285,6 +320,7 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
         return controller.emotionConfig;
       },
       gesture: gestures,
+      semantic,
       stage,
     };
   }
@@ -465,6 +501,11 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
       setAuto: (on) => (gestures.auto = on),
       setEnabled: (on) => (gestures.enabled = on),
     },
+    semantic: {
+      setEnabled: setSemanticEnabled,
+      setPacing: (on) => semantic?.setPacing(on),
+      setProbabilityScale: (v) => (gestures.semantic.config.probabilityScale = Math.max(0, v)),
+    },
     setTelemetry(enabled) {
       telemetryWanted = enabled;
       if (!enabled) telemetry = null;
@@ -553,7 +594,45 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
         pixelRatio: r.pixelRatio,
         memoryMb: memory ? memory.usedJSHeapSize / 1048576 : null,
       },
+      semantic: semanticSample(),
       telemetry,
+    };
+  }
+
+  function semanticSample(): DevSample['semantic'] {
+    const st = gestures.semanticStatus;
+    const feed = semantic?.status;
+    const decisions = new Map(st.decisions.map((d) => [d.segmentId, d] as const));
+    return {
+      available: semantic !== null,
+      enabled: (feed?.enabled ?? false) && st.enabled,
+      error: feed?.error ?? st.error,
+      pacing: feed?.pacing ?? false,
+      mode: feed?.pacer.mode ?? 'immediate',
+      spokenChars: feed?.pacer.spokenChars ?? 0,
+      pending: (feed?.pacer.pending ?? 0) + st.queued,
+      dropped: feed?.pacer.dropped ?? 0,
+      messages: feed?.messages ?? 0,
+      segments: feed?.segments ?? 0,
+      cues: feed?.cues ?? 0,
+      intents: st.intents,
+      accepted: st.accepted,
+      probabilityScale: gestures.semantic.config.probabilityScale,
+      busyMs: feed?.busyMs ?? 0,
+      entries: (feed?.recent ?? []).map((i) => {
+        const d = decisions.get(i.segmentId);
+        return {
+          segmentId: i.segmentId,
+          text: i.text,
+          early: i.early,
+          cues: i.cues.map((c) => ({ type: c.type, role: c.role, confidence: c.confidence, strength: c.strength })),
+          matches: i.matches.map((m) => ({ kind: m.kind, marker: m.marker, locale: m.locale, tier: m.tier, confidence: m.confidence })),
+          modifiers: [...i.modifiers],
+          decision: d
+            ? { accepted: d.accepted, gesture: d.gesture, reason: d.reason, probability: d.probability, cue: d.cue, intensity: d.intensity }
+            : null,
+        };
+      }),
     };
   }
 
@@ -574,6 +653,7 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
     resolver.update(delta);
     // The mic hears the speakers when echo cancellation falls short: no reactions while the assistant talks.
     reaction.setSuppressed(resolver.signals.assistantSpeaking);
+    semantic?.update(delta, resolver.signals.voiceUiActive, resolver.signals.assistantSpeaking);
     controller.update(delta);
     stage.render();
     devMode.handle?.frame(delta);
@@ -667,6 +747,14 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
     d.gestureCount = String(gestures.history.gestureCount);
     // Largest arm offset in the composed pose: "no large arm movement after an interruption".
     d.armOffset = maxArmOffset(controller.pose).toFixed(4);
+    const sem = gestures.semanticStatus;
+    const feed = semantic?.status;
+    d.semanticEnabled = String((feed?.enabled ?? false) && sem.enabled);
+    d.semanticMode = feed?.pacer.mode ?? 'off';
+    d.semanticCues = String(feed?.cues ?? 0);
+    d.semanticIntents = String(sem.intents);
+    d.semanticAccepted = String(sem.accepted);
+    d.semanticLast = feed?.recent.at(-1)?.cues.map((c) => c.type).join(' ') ?? '';
     const mix = controller.emotionMix;
     const pose = controller.pose;
     const followed = emotion.value;
@@ -763,6 +851,8 @@ export function mountAvatar(options: AvatarRuntimeOptions): AvatarRuntimeHandle 
       view.removeEventListener('resize', onViewportResize);
       doc.removeEventListener(EMOTION_DEBUG_EVENT, onEmotionDebug);
       doc.removeEventListener(GESTURE_DEBUG_EVENT, onGestureDebug);
+      doc.removeEventListener(SEMANTIC_DEBUG_EVENT, onSemanticDebug);
+      semantic?.dispose();
       if (window.__PROSOPON_DEBUG__?.diagnostics === diag) delete window.__PROSOPON_DEBUG__;
       restoreOrb?.();
       restoreOrb = null;

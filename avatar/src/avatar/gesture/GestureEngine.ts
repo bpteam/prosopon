@@ -11,16 +11,22 @@ import {
 } from './Gesture';
 import { gestureConfig, type GestureConfig, type GestureConfigOverrides, type Range } from './GestureConfig';
 import type { EmotionFrame } from '../../audio/emotion/EmotionFrame';
+import type { SemanticIntent } from '../../semantic/SemanticCue';
 import type { AvatarState } from '../AvatarStateProfiles';
+import type { SemanticGestureConfigOverrides } from './SemanticGestureConfig';
+import { SemanticGesturePolicy, type SemanticDecision } from './SemanticGesturePolicy';
 
 /** Who asked for a gesture. A request only preempts a running gesture of lower priority. */
 export const GESTURE_PRIORITY = Object.freeze({
   ambient: 0,
+  /** Prosody-driven accents while the assistant speaks. */
   emphasis: 1,
+  /** Semantic intents from the reply's text (question, contrast, conclusion …). */
+  semantic: 2,
   /** Utterance boundaries: the user finished a phrase, the assistant starts talking. */
-  boundary: 2,
+  boundary: 3,
   /** Debug/manual trigger. */
-  forced: 3,
+  forced: 4,
 });
 
 export interface GestureHistory {
@@ -33,6 +39,21 @@ export interface GestureHistory {
 export interface GestureEngineOptions {
   config?: GestureConfigOverrides;
   random?: RandomSource;
+  /** How semantic intents map to gestures (probabilities, cooldowns, candidates). */
+  semantic?: SemanticGestureConfigOverrides;
+}
+
+/** Semantic side of the engine, for diagnostics. */
+export interface SemanticGestureStatus {
+  enabled: boolean;
+  /** Intents waiting for the next update(). */
+  queued: number;
+  intents: number;
+  accepted: number;
+  /** Last decisions, newest last. */
+  decisions: readonly SemanticDecision[];
+  /** Set when the semantic path threw; it is then switched off and the rest of the engine keeps running. */
+  error: string | null;
 }
 
 interface Running {
@@ -54,12 +75,15 @@ interface Pending {
   type: GestureType;
   priority: number;
   intensity: number;
+  /** 0: pick a side at random. */
+  side: number;
 }
 
 /**
- * Procedural gesture source: decides when to nod, tilt the head, shift the body or shoulders, or emphasise with a
- * hand, from conversation state, both voices' prosody (EmotionFrame) and user utterance boundaries. No transcript,
- * no semantics, no renderer: the output is a GestureFrame of offsets that only BehaviorMixer turns into a pose.
+ * Gesture source: decides when to nod, tilt the head, shift the body or shoulders, lean in, shake the head slightly
+ * or emphasise with a hand, from conversation state, both voices' prosody (EmotionFrame), user utterance
+ * boundaries and, optionally, semantic intents of the reply's text (pushSemantic → SemanticGesturePolicy). No
+ * renderer: the output is a GestureFrame of offsets that only BehaviorMixer turns into a pose.
  *
  * Scheduling: at most one primary gesture at a time; after it, a randomised per-type cooldown; out of cooldown, a
  * per-state rate (Poisson hazard, frame-rate independent) modulated by the assistant's activity while it speaks,
@@ -84,7 +108,12 @@ export class GestureEngine implements GestureSource {
   };
   private active = false;
   private hasPending = false;
-  private readonly pendingSlot: Pending = { type: 'nod', priority: 0, intensity: 0 };
+  private readonly pendingSlot: Pending = { type: 'nod', priority: 0, intensity: 0, side: 0 };
+  /** Decides whether semantic intents move the avatar. Mutable config for debug tuning. */
+  readonly semantic: SemanticGesturePolicy;
+  private readonly semanticQueue: { intent: SemanticIntent; at: number }[] = [];
+  private lastSemanticIntentAt = -Infinity;
+  private semanticError: string | null = null;
   private cooldown = 0;
   private clock = 0;
 
@@ -108,6 +137,7 @@ export class GestureEngine implements GestureSource {
   constructor(options: GestureEngineOptions = {}) {
     this.config = gestureConfig(options.config);
     this.random = options.random ?? mathRandom;
+    this.semantic = new SemanticGesturePolicy(options.semantic);
   }
 
   /** Output of the last update(). Mutated in place every frame. */
@@ -152,6 +182,31 @@ export class GestureEngine implements GestureSource {
     return this.counts.nod + this.counts['double-nod'];
   }
 
+  get semanticStatus(): SemanticGestureStatus {
+    const st = this.semantic.stats;
+    return {
+      enabled: this.semantic.config.enabled,
+      queued: this.semanticQueue.length,
+      intents: st.intents,
+      accepted: st.accepted,
+      decisions: this.semantic.history,
+      error: this.semanticError,
+    };
+  }
+
+  /**
+   * A semantic intent (what a part of the reply does). Queued and decided on the next update(), where the engine
+   * knows the conversation state, the user and the running gesture; most intents end in no gesture at all.
+   * Never throws: a malformed intent or a policy error switches the semantic path off, nothing else.
+   */
+  pushSemantic(intent: SemanticIntent): void {
+    if (!this.semantic.config.enabled || !intent || !Array.isArray(intent.cues)) return;
+    const q = this.semanticQueue;
+    q.push({ intent, at: this.clock });
+    while (q.length > Math.max(1, this.semantic.config.maxQueue)) q.shift();
+    this.lastSemanticIntentAt = this.clock;
+  }
+
   /** Replaces the random source (a seeded one for deterministic tests/E2E). */
   setRandom(random: RandomSource): void {
     this.random = random;
@@ -175,6 +230,8 @@ export class GestureEngine implements GestureSource {
   reset(): void {
     this.active = false;
     this.hasPending = false;
+    this.semanticQueue.length = 0;
+    this.semantic.reset();
     this.cooldown = 0;
     this.prevState = null;
     this.prevUtteranceEnds = null;
@@ -192,12 +249,13 @@ export class GestureEngine implements GestureSource {
     this.state = ctx.conversationState;
 
     this.handleEvents(ctx);
+    if (this.semanticQueue.length) this.handleSemantic(ctx);
 
     let finished = false;
     if (this.active) finished = this.advance(dt);
     if (!this.active && this.hasPending && c.enabled) {
       this.hasPending = false;
-      this.start(this.pendingSlot.type, this.pendingSlot.intensity, this.pendingSlot.priority);
+      this.start(this.pendingSlot.type, this.pendingSlot.intensity, this.pendingSlot.priority, this.pendingSlot.side);
     }
     if (!this.active) {
       this.cooldown -= dt;
@@ -229,6 +287,8 @@ export class GestureEngine implements GestureSource {
     // emotion channel counts too: the reaction side may be suppressed (echo guard) while the assistant still talks.
     if (prev === 'speaking' && state !== 'speaking' && (ctx.userSpeaking || ctx.userEmotion.active)) {
       this.hasPending = false;
+      // What the reply was about to stress no longer matters: the user has the floor.
+      this.semanticQueue.length = 0;
       this.startCancel(c.interruptRelease);
       this.cooldown = Math.max(this.cooldown, c.interruptCooldown);
     }
@@ -271,6 +331,35 @@ export class GestureEngine implements GestureSource {
     this.request(double ? 'double-nod' : 'nod', this.intensityFor('listening', ctx), GESTURE_PRIORITY.boundary);
   }
 
+  // --- semantic ----------------------------------------------------------------
+
+  private handleSemantic(ctx: Readonly<GestureContext>): void {
+    const q = this.semanticQueue;
+    try {
+      while (q.length) {
+        const { intent, at } = q.shift()!;
+        const r = this.running;
+        const pendingBlocks = this.hasPending && this.pendingSlot.priority >= GESTURE_PRIORITY.semantic;
+        const d = this.semantic.decide(intent, this.clock - at, {
+          clock: this.clock,
+          state: ctx.conversationState,
+          userSpeaking: ctx.userSpeaking,
+          handsAllowed: this.handsAllowed(),
+          activity: ctx.conversationState === 'speaking' ? this.activity(ctx.assistantEmotion) : 0,
+          busy: !this.config.enabled || pendingBlocks || (this.active && !r.cancelling && r.priority >= GESTURE_PRIORITY.semantic),
+          lastGestureType: this.hist.lastGestureType,
+          random: this.random,
+        });
+        if (d.accepted && d.gesture) this.request(d.gesture, d.intensity, GESTURE_PRIORITY.semantic, d.side);
+      }
+    } catch (error) {
+      // Fail soft: the semantic path goes quiet, procedural gestures carry on.
+      q.length = 0;
+      this.semantic.config.enabled = false;
+      this.semanticError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
   // --- scheduler ---------------------------------------------------------------
 
   /** Out of cooldown: maybe start a gesture this frame (Poisson over the summed per-type rates). */
@@ -281,7 +370,12 @@ export class GestureEngine implements GestureSource {
     const scale = Math.max(0, Number.isFinite(c.rateScale) ? c.rateScale : 0);
     const a = ctx.assistantEmotion;
     const activity = state === 'speaking' ? this.activity(a) : 0;
-    const speakingFactor = state === 'speaking' ? c.speakingRateFloor + (1 - c.speakingRateFloor) * activity : 1;
+    let speakingFactor = state === 'speaking' ? c.speakingRateFloor + (1 - c.speakingRateFloor) * activity : 1;
+    // Semantic accents replace prosodic ones while the reply's text is being followed, instead of adding to them.
+    const sem = this.semantic.config;
+    if (state === 'speaking' && sem.enabled && this.clock - this.lastSemanticIntentAt < sem.ambientWindow) {
+      speakingFactor *= sem.ambientRateScale;
+    }
 
     let total = 0;
     for (let i = 0; i < GESTURE_TYPES.length; i++) {
@@ -342,7 +436,7 @@ export class GestureEngine implements GestureSource {
     return lerp(lo, hi, 0.25);
   }
 
-  private request(type: GestureType, intensity: number, priority: number): boolean {
+  private request(type: GestureType, intensity: number, priority: number, side = 0): boolean {
     if (!this.config.enabled) return false;
     const i = clamp01(intensity);
     if (this.active) {
@@ -353,17 +447,18 @@ export class GestureEngine implements GestureSource {
       this.pendingSlot.type = type;
       this.pendingSlot.intensity = i;
       this.pendingSlot.priority = priority;
+      this.pendingSlot.side = side;
       this.hasPending = true;
       if (!r.cancelling) this.startCancel(this.config.cancelRelease);
       return true;
     }
-    this.start(type, i, priority);
+    this.start(type, i, priority, side);
     return true;
   }
 
   // --- lifecycle ---------------------------------------------------------------
 
-  private start(type: GestureType, intensity: number, priority: number): void {
+  private start(type: GestureType, intensity: number, priority: number, side = 0): void {
     const t = this.config.types[type];
     const r = this.running;
     r.type = type;
@@ -371,7 +466,7 @@ export class GestureEngine implements GestureSource {
     r.intensity = intensity;
     r.duration = Math.max(0.05, pickRange(t.duration, this.random));
     r.elapsed = 0;
-    r.side = this.random.next() < 0.5 ? 1 : -1;
+    r.side = side !== 0 ? Math.sign(side) : this.random.next() < 0.5 ? 1 : -1;
     r.cancelling = false;
     r.cancelElapsed = 0;
     this.active = true;
@@ -479,11 +574,13 @@ export class GestureEngine implements GestureSource {
   }
 }
 
-/** Shape of a gesture over its progress, [0, 1], zero with zero slope at both ends. */
+/** Shape of a gesture over its progress, [0, 1] (head-shake: signed, [−1, 1]), zero with zero slope at both ends. */
 function curve(type: GestureType, p: number, attack: number, hold: number): number {
   if (p <= 0 || p >= 1) return 0;
   if (type === 'nod') return Math.sin(Math.PI * p) ** 2;
   if (type === 'double-nod') return Math.sin(2 * Math.PI * p) ** 2 * (p < 0.5 ? 1 : 0.7);
+  // One swing to the side and back past centre, fading: signed, zero with zero slope at both ends.
+  if (type === 'head-shake') return 1.3 * Math.sin(2 * Math.PI * p) * Math.sin(Math.PI * p);
   const a = Math.max(1e-3, attack);
   if (p < a) return smoothstep(p / a);
   if (p < a + hold) return 1;

@@ -21,6 +21,7 @@ import { EmotionChannels } from './avatar/EmotionChannels';
 import { GestureEngine } from './avatar/gesture/GestureEngine';
 import { mathRandom, seededRandom, type GestureFrame, type GestureType } from './avatar/gesture/Gesture';
 import { GestureDebugPanel } from './debug/GestureDebugPanel';
+import { SemanticDebugPanel } from './debug/SemanticDebugPanel';
 import featureWorkletUrl from './audio/user/UserVoiceWorklet.ts?worker&url';
 import { AvatarStage } from './renderer/AvatarStage';
 import { CAMERA_ADJUST_LIMITS, CAMERA_PRESETS, type CameraPreset } from './renderer/CameraFraming';
@@ -42,6 +43,8 @@ export interface AvatarDebugApi {
   emotion: EmotionChannels;
   emotionPanel: EmotionDebugPanel | null;
   gesture: GestureDebugApi;
+  /** Semantic demo player (null until the GUI exists). */
+  semantic: SemanticDebugPanel | null;
   /** Live getter: current conversation state (also before the avatar is loaded). */
   readonly state: AvatarState;
 }
@@ -105,6 +108,7 @@ let lipSyncPanel: LipSyncDebugPanel | null = null;
 let visemePanel: VisemeDebugPanel | null = null;
 let emotionPanel: EmotionDebugPanel | null = null;
 let gesturePanel: GestureDebugPanel | null = null;
+let semanticPanel: SemanticDebugPanel | null = null;
 let errorBanner: HTMLElement | null = null;
 
 const debugApi: AvatarDebugApi = {
@@ -142,6 +146,7 @@ const debugApi: AvatarDebugApi = {
     },
     seed: (seed) => gestures.setRandom(seed === null ? mathRandom : seededRandom(seed)),
   },
+  semantic: null,
   get state() {
     return controller.getState();
   },
@@ -150,6 +155,7 @@ if (import.meta.env.DEV) window.__AVATAR_DEBUG__ = debugApi;
 
 // Single rAF loop: controller (state → idle → lip sync → composition → avatar/VRM) → render.
 const loop = new RenderLoop((delta) => {
+  semanticPanel?.update(delta);
   controller.update(delta);
   emotionPanel?.update();
   gesturePanel?.update();
@@ -183,6 +189,8 @@ async function boot(): Promise<void> {
     emotionPanel = new EmotionDebugPanel(panel.gui, audio, controller, emotion, featureWorkletUrl);
     debugApi.emotionPanel = emotionPanel;
     gesturePanel = new GestureDebugPanel(panel.gui, gestures);
+    semanticPanel = new SemanticDebugPanel(panel.gui, controller, gestures);
+    debugApi.semantic = semanticPanel;
     buildCameraFolder(panel.gui);
 
     overlay.setInfo({ loaded: true, vrmVersion: formatVrmVersion(avatar.vrmVersion) });
