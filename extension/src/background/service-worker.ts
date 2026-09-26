@@ -7,9 +7,12 @@ import {
   type ExtensionTabState,
   type MicStatus,
   isMicStatus,
+  type EmotionModelInstallState,
 } from '../shared/messages';
 import { isChatGptUrl } from '../shared/urls';
 import { TabSessions, type CaptureBackend } from './TabSessions';
+import { EmotionModelInstaller, type EmotionInstallState } from '../emotion/EmotionModelInstaller';
+import { IndexedDbModelStorage } from '../emotion/ModelStorage';
 
 /**
  * Orchestration only: action clicks, tab identity, capture startup, the offscreen document's lifecycle, message
@@ -20,6 +23,25 @@ import { TabSessions, type CaptureBackend } from './TabSessions';
  */
 
 const OFFSCREEN_URL = 'offscreen/index.html';
+
+const emotionInstaller = new EmotionModelInstaller(new IndexedDbModelStorage(), (state) => {
+  void chrome.runtime.sendMessage(message({ type: 'emotion:model-state', state: publicEmotionState(state) })).catch(() => {});
+});
+function publicEmotionState(state: EmotionInstallState): EmotionModelInstallState {
+  return { status: state.status, downloaded: state.downloaded, error: state.error, installed: !!state.metadata, enabled: state.metadata?.enabled };
+}
+async function initializeEmotionModel(): Promise<EmotionInstallState> {
+  try {
+    await ensureOffscreen();
+    const selfTest = await toOffscreen({ type: 'emotion:model-self-test' }) as { ok?: boolean; error?: string };
+    return selfTest.ok ? emotionInstaller.markReady() : await emotionInstaller.markRuntimeError(selfTest.error ?? 'Model self-test failed.');
+  } catch (error) {
+    return emotionInstaller.markRuntimeError(`Model self-test failed: ${String(error)}`);
+  }
+}
+async function deactivateEmotionModel(): Promise<void> {
+  if (await hasOffscreen()) await toOffscreen({ type: 'emotion:model-deactivate' }).catch(() => {});
+}
 
 let offscreenOp: Promise<unknown> = Promise.resolve();
 /** Offscreen create/close must not interleave (createDocument rejects if one exists). */
@@ -174,6 +196,7 @@ chrome.runtime.onStartup.addListener(() => void ensureMicMenu());
 /** Rebuild state after a worker restart from the captures the offscreen document still holds. */
 const ready: Promise<void> = (async () => {
   try {
+    await emotionInstaller.restore();
     if (!(await hasOffscreen())) return;
     const reply = (await toOffscreen({ type: 'capture:list' })) as CaptureListReply | undefined;
     sessions.restore(reply?.tabIds ?? []);
@@ -238,6 +261,30 @@ chrome.runtime.onMessage.addListener((raw, sender, sendResponse) => {
       if (tabId !== undefined) setTimeout(() => void chrome.tabs.remove(tabId).catch(() => {}), 1200);
       return;
     }
+    case 'emotion:model-info':
+      void ready.then(() => sendResponse(publicEmotionState(emotionInstaller.current)));
+      return true;
+    case 'emotion:model-install':
+      void ready.then(async () => {
+        const result = await emotionInstaller.install(msg.enable);
+        if (result.status !== 'initializing') { sendResponse(publicEmotionState(result)); return; }
+        sendResponse(publicEmotionState(await initializeEmotionModel()));
+      });
+      return true;
+    case 'emotion:model-cancel':
+      emotionInstaller.cancel();
+      sendResponse(publicEmotionState(emotionInstaller.current));
+      return;
+    case 'emotion:model-remove':
+      void ready.then(async () => { await deactivateEmotionModel(); sendResponse(publicEmotionState(await emotionInstaller.remove())); });
+      return true;
+    case 'emotion:model-enable':
+      void ready.then(async () => {
+        const state = await emotionInstaller.setEnabled(msg.enabled);
+        if (!msg.enabled) await deactivateEmotionModel();
+        sendResponse(publicEmotionState(state.status === 'initializing' ? await initializeEmotionModel() : state));
+      });
+      return true;
     case 'extension:error':
       console.warn(`[prosopon] tab ${sender.tab?.id}: ${msg.error}`);
       return;

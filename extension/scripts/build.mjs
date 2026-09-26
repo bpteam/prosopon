@@ -7,7 +7,7 @@
 //  3. ES, single file: the user-voice AudioWorklet module (worklets load one module by URL, without chunks).
 //
 //   node scripts/build.mjs [--mode development] [--watch]
-import { copyFile, mkdir } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'vite';
@@ -24,6 +24,9 @@ const watch = args.includes('--watch')
     : {}
   : null;
 const dev = mode === 'development';
+const ml = process.env.PROSOPON_ML === '1';
+const embedModel = process.env.PROSOPON_EMBED_MODEL === '1';
+if (embedModel && !ml) throw new Error('PROSOPON_EMBED_MODEL=1 requires PROSOPON_ML=1');
 // import.meta.env.DEV follows NODE_ENV, not --mode: development builds carry the diagnostics and the E2E hook.
 process.env.NODE_ENV = dev ? 'development' : 'production';
 
@@ -36,6 +39,7 @@ const shared = {
     // Core sources live outside this package; make sure there is one copy of three.
     dedupe: ['three', '@pixiv/three-vrm'],
   },
+  define: { __PROSOPON_ML__: JSON.stringify(ml), __PROSOPON_EMBED_MODEL__: JSON.stringify(embedModel) },
 };
 
 /**
@@ -48,11 +52,10 @@ function copyStatic() {
     [resolve(root, 'manifest.json'), 'manifest.json'],
     [resolve(avatarRoot, 'node_modules/wlipsync/dist/audio-processor.js'), 'lipsync/wlipsync/audio-processor.js'],
     [resolve(avatarRoot, 'node_modules/wlipsync/dist/wlipsync.wasm'), 'lipsync/wlipsync/wlipsync.wasm'],
-    [
-      resolve(avatarRoot, 'node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.jsep.wasm'),
-      'ort/ort-wasm-simd-threaded.jsep.wasm',
-    ],
   ];
+  if (ml) files.push([resolve(avatarRoot, 'node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.jsep.wasm'), 'ort/ort-wasm-simd-threaded.jsep.wasm']);
+  // Deliberately opt-in: distributors place the verified artifact here before making a Web Store-safe embedded build.
+  if (embedModel) files.push([resolve(root, 'model-assets/distilhubert_ser_int8.onnx'), 'emotion-model/distilhubert_ser_int8.onnx']);
   return {
     name: 'prosopon-copy-static',
     async writeBundle() {
@@ -60,6 +63,13 @@ function copyStatic() {
         await mkdir(dirname(resolve(outDir, to)), { recursive: true });
         await copyFile(from, resolve(outDir, to));
       }
+      const manifest = JSON.parse(await readFile(resolve(root, 'manifest.json'), 'utf8'));
+      if (ml) {
+        manifest.host_permissions = [...manifest.host_permissions, 'https://huggingface.co/*'];
+        manifest.content_security_policy = { extension_pages: "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';" };
+        manifest.action.default_popup = 'popup/index.html';
+      }
+      await writeFile(resolve(outDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
     },
   };
 }
@@ -85,6 +95,7 @@ await build({
         background: resolve(root, 'src/background/service-worker.ts'),
         offscreen: resolve(root, 'src/offscreen/index.html'),
         permission: resolve(root, 'src/permission/index.html'),
+        popup: resolve(root, 'src/popup/index.html'),
         'avatar-runtime': resolve(root, 'src/content/avatar-runtime.ts'),
       },
       preserveEntrySignatures: 'exports-only',
@@ -134,4 +145,4 @@ await build({
   },
 });
 
-if (!watch) console.log(`[prosopon] built ${mode} extension into ${outDir}`);
+if (!watch) console.log(`[prosopon] built ${ml ? 'ML' : 'basic'} ${mode} extension into ${outDir}`);

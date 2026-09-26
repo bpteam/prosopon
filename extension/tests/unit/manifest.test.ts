@@ -9,6 +9,7 @@ const manifest = JSON.parse(readFileSync(resolve(EXT, 'manifest.json'), 'utf8'))
   content_scripts: { js: string[] }[];
 };
 const serviceWorker = readFileSync(resolve(EXT, 'src/background/service-worker.ts'), 'utf8');
+const buildScript = readFileSync(resolve(EXT, 'scripts/build.mjs'), 'utf8');
 
 /**
  * Regression (US-005): after an extension reload/update, chatgpt.com tabs that were already open held no content
@@ -42,16 +43,16 @@ describe('microphone reactions (US-005)', () => {
   });
 });
 
-describe('local emotion model (US-006)', () => {
+describe('local emotion model build modes (US-007)', () => {
   const csp = (manifest as unknown as { content_security_policy?: { extension_pages?: string } }).content_security_policy;
 
-  it("allows WebAssembly compilation on extension pages ('wasm-unsafe-eval') and nothing looser", () => {
-    // Without it ONNX Runtime fails in the offscreen document: "Refused to compile or instantiate WebAssembly".
-    expect(csp?.extension_pages).toMatch(/script-src 'self' 'wasm-unsafe-eval'/);
-    expect(csp?.extension_pages).not.toMatch(/'unsafe-eval'|'unsafe-inline'|https?:|\*/);
+  it('keeps the basic manifest free of ML CSP capability, adding it only to the ML package', () => {
+    expect(csp).toBeUndefined();
+    expect(buildScript).toMatch(/PROSOPON_ML/);
+    expect(buildScript).toMatch(/'wasm-unsafe-eval'/);
   });
 
-  it('asks for no new permissions: the model is a packaged file, never fetched from the network', () => {
+  it('keeps the basic package permission-minimal', () => {
     expect(manifest.permissions).toEqual(['tabCapture', 'offscreen', 'scripting', 'contextMenus', 'storage']);
   });
 });

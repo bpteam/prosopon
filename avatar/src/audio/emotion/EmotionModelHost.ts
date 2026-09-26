@@ -168,6 +168,13 @@ export class EmotionModelHost {
     this.channels.clear();
   }
 
+  /** Installation smoke test: a deterministic 2-second silent waveform must load and produce finite dimensions. */
+  async selfTest(): Promise<void> {
+    if (this.statusValue !== 'ready' || !this.model) throw new Error(this.errorValue ?? 'model is not ready');
+    const value = await withTimeout(this.model.infer(new Float32Array(this.windowSamples)), this.inferTimeoutMs, 'self-test timed out');
+    if (!Number.isFinite(value.arousal) || !Number.isFinite(value.valence)) throw new Error('self-test returned non-finite output');
+  }
+
   private async infer(id: string, ch: Channel): Promise<void> {
     const model = this.model;
     if (!model) return;

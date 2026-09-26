@@ -6,7 +6,6 @@ import { VisemeLipSync } from '@avatar/audio/VisemeLipSync';
 import { headAudioFactory } from '@avatar/audio/analyzers/HeadAudioAnalyzer';
 import { wLipSyncFactory } from '@avatar/audio/analyzers/WLipSyncAnalyzer';
 import { EmotionModelHost } from '@avatar/audio/emotion/EmotionModelHost';
-import { parseModelSpec } from '@avatar/audio/emotion/EmotionModel';
 import { onnxEmotionLoader } from '@avatar/audio/emotion/OnnxEmotionModel';
 import {
   LIPSYNC_PORT,
@@ -23,6 +22,8 @@ import {
 import { PCM_CHUNK_SECONDS, ProsodyChannel, attachFeatureWorklet } from './ProsodyChannel';
 import { UserVoicePipeline } from './UserVoicePipeline';
 
+declare const __PROSOPON_ML__: boolean;
+
 /**
  * Offscreen audio runtime, the only extension context that touches audio. Two independent pipelines:
  *
@@ -32,7 +33,7 @@ import { UserVoicePipeline } from './UserVoicePipeline';
  *                                                                        ProsodyChannel ◄──┘ → EmotionFrame ('user')
  *
  * Both channels run the same feature extractor and the same ProsodyEmotionAnalyzer class, each with its own
- * instance. An optional local model (emotion-model/model.json, not shipped) serves both through one host.
+ * instance. An opted-in locally stored model serves both through one host.
  * They never share a node or a context; each only produces frames, streamed to the content scripts over their
  * Ports. Knows nothing about the avatar, three.js or ChatGPT's DOM.
  */
@@ -50,8 +51,6 @@ export const AUDIO_RUNTIME_CONFIG = {
   monitorDelay: 0,
   /** UserVoiceFrames per second (counted in audio time by the worklet); also the assistant's feature rate. */
   userFrameRate: 25,
-  /** Description of an optional local emotion model; missing file = prosody rules only. */
-  emotionModelPath: 'emotion-model/model.json',
   /** ONNX Runtime's WebAssembly binary (serves the WebGPU and the WASM backend). */
   ortWasmPath: 'ort/ort-wasm-simd-threaded.jsep.wasm',
 };
@@ -252,30 +251,27 @@ function setEmotionStatus(status: EmotionStatus): void {
 }
 
 /**
- * Looks for a packaged model description once. No file (the default build): prosody rules, mode 'heuristic'. A
- * model that fails to load or run: mode 'fallback'. Either way the avatar keeps working.
+ * Reads an opted-in installed model only when the offscreen audio runtime exists. The basic build has this branch
+ * compiled away, so it never ships ONNX Runtime or model-install code.
  */
 async function loadEmotionModel(): Promise<void> {
-  let raw: unknown;
+  if (emotionHost) return;
+  if (!__PROSOPON_ML__) return;
   try {
-    const response = await fetch(url(AUDIO_RUNTIME_CONFIG.emotionModelPath));
-    if (!response.ok) return;
-    raw = await response.json();
+    const { installedEmotionModel } = await import('../emotion/InstalledModel');
+    const installed = await installedEmotionModel();
+    if (!installed) return;
+    const spec = { ...installed.spec, data: installed.data, outputNames: { arousal: 'arousal', valence: 'valence' } };
+    const host = new EmotionModelHost(spec, onnxEmotionLoader({ wasmUrl: url(AUDIO_RUNTIME_CONFIG.ortWasmPath) }));
+    emotionHost = host;
+    userEmotion.attachHost(host);
+    for (const session of sessions.values()) session.emotion.attachHost(host);
+    setEmotionStatus({ model: 'loading', mode: 'heuristic', inferences: 0 });
+    await host.load();
+    refreshEmotionStatus();
   } catch {
-    return; // no model packaged
+    setEmotionStatus({ model: 'failed', mode: 'fallback', inferences: 0, error: 'emotion model could not be initialized' });
   }
-  const spec = parseModelSpec(raw, (file) => url(`emotion-model/${file}`));
-  if (!spec) {
-    setEmotionStatus({ model: 'failed', mode: 'fallback', inferences: 0, error: 'invalid emotion-model/model.json' });
-    return;
-  }
-  const host = new EmotionModelHost(spec, onnxEmotionLoader({ wasmUrl: url(AUDIO_RUNTIME_CONFIG.ortWasmPath) }));
-  emotionHost = host;
-  userEmotion.attachHost(host);
-  for (const session of sessions.values()) session.emotion.attachHost(host);
-  setEmotionStatus({ model: 'loading', mode: 'heuristic', inferences: 0 });
-  await host.load();
-  refreshEmotionStatus();
 }
 
 /** Current model status (inference count and failures change without events). */
@@ -287,6 +283,18 @@ function refreshEmotionStatus(): EmotionStatus {
   return emotionStatus;
 }
 void loadEmotionModel();
+async function selfTestEmotionModel(): Promise<{ ok: true } | { ok: false; error: string }> {
+  await loadEmotionModel();
+  try { await emotionHost?.selfTest(); return emotionHost ? { ok: true } : { ok: false, error: 'model is not available' }; }
+  catch (error) { return { ok: false, error: describeError(error) }; }
+}
+function deactivateEmotionModel(): void {
+  emotionHost?.dispose();
+  emotionHost = null;
+  userEmotion.attachHost(null);
+  for (const session of sessions.values()) session.emotion.attachHost(null);
+  setEmotionStatus({ model: 'off', mode: 'heuristic', inferences: 0 });
+}
 /** Set by the service worker from the user's opt-in; off until then. */
 let micWanted = false;
 
@@ -365,6 +373,13 @@ chrome.runtime.onMessage.addListener((raw, _sender, sendResponse) => {
       return true;
     case 'mic:info':
       sendResponse(userVoice.info satisfies MicInfo);
+      return;
+    case 'emotion:model-self-test':
+      void selfTestEmotionModel().then(sendResponse);
+      return true;
+    case 'emotion:model-deactivate':
+      deactivateEmotionModel();
+      sendResponse({ ok: true });
       return;
     default:
       return;

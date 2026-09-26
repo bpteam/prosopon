@@ -34,7 +34,9 @@ export function onnxEmotionLoader(options: OnnxLoaderOptions = {}): EmotionModel
     let lastError: unknown = null;
     for (const backend of attempts) {
       try {
-        const session = await ort.InferenceSession.create(spec.url, { executionProviders: [backend] });
+        const session = spec.data
+          ? await ort.InferenceSession.create(new Uint8Array(spec.data), { executionProviders: [backend] })
+          : await ort.InferenceSession.create(spec.url, { executionProviders: [backend] });
         return new OnnxEmotionModel(ort, session, spec, backend);
       } catch (error) {
         lastError = error;
@@ -74,6 +76,15 @@ class OnnxEmotionModel implements EmotionModel {
     if (this.disposed) throw new Error('model disposed');
     const input = new this.ort.Tensor('float32', samples, [1, samples.length]);
     const result = await this.session.run({ [this.inputName]: input });
+    if (this.spec.outputNames) {
+      const arousal = result[this.spec.outputNames.arousal];
+      const valence = result[this.spec.outputNames.valence];
+      if (!arousal || !valence) throw new Error('model has no arousal/valence outputs');
+      const a = Number(((await arousal.getData()) as Float32Array)[0]);
+      const v = Number(((await valence.getData()) as Float32Array)[0]);
+      if (!Number.isFinite(a) || !Number.isFinite(v)) throw new Error('model returned non-finite output');
+      return readEstimate(this.spec, [a, v]);
+    }
     const output = result[this.outputName];
     if (!output) throw new Error(`model has no output "${this.outputName}"`);
     return readEstimate(this.spec, (await output.getData()) as Float32Array);

@@ -7,7 +7,7 @@ import { EMOTION_CHANNELS, isEmotionFrame, type EmotionChannel, type EmotionFram
  * Bump when a message changes shape: contexts of different versions (content scripts left over from before an
  * extension update) then ignore each other instead of misreading.
  */
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 /** Port the content script opens to the offscreen document to receive lip-sync frames for its tab. */
 export const LIPSYNC_PORT = 'prosopon:lipsync';
@@ -58,6 +58,14 @@ export interface EmotionStatus {
   inferences: number;
   error?: string;
 }
+export type EmotionModelInstallStatus = 'not-installed' | 'downloading' | 'verifying' | 'initializing' | 'ready' | 'disabled' | 'error';
+export interface EmotionModelInstallState {
+  status: EmotionModelInstallStatus;
+  downloaded?: number;
+  error?: string;
+  installed?: boolean;
+  enabled?: boolean;
+}
 type AnalyzerModeName = EmotionFrame['mode'];
 
 export type ExtensionPayload =
@@ -83,6 +91,17 @@ export type ExtensionPayload =
   | { type: 'mic:info' }
   /** Permission page → SW: the extension origin was just granted the microphone. */
   | { type: 'mic:granted' }
+  /** Popup/options ↔ service worker: consented local model management. */
+  | { type: 'emotion:model-info' }
+  | { type: 'emotion:model-install'; enable: boolean }
+  | { type: 'emotion:model-cancel' }
+  | { type: 'emotion:model-remove' }
+  | { type: 'emotion:model-enable'; enabled: boolean }
+  /** Service worker → offscreen: load the just-installed local artifact and run a deterministic smoke inference. */
+  | { type: 'emotion:model-self-test' }
+  | { type: 'emotion:model-deactivate' }
+  /** Service worker → popup/offscreen: state of a binary model installation. */
+  | { type: 'emotion:model-state'; state: EmotionModelInstallState }
   /** Offscreen → every enabled tab's content over LIPSYNC_PORT, ~25 per second while the mic is on. */
   | { type: 'user:frame'; frame: UserVoiceFrame }
   /** Offscreen → content over LIPSYNC_PORT, on change and to every new port. */
@@ -139,6 +158,14 @@ const VALIDATORS: Record<MessageType, Validator> = {
   'mic:set': (m) => typeof m.enabled === 'boolean',
   'mic:info': () => true,
   'mic:granted': () => true,
+  'emotion:model-info': () => true,
+  'emotion:model-install': (m) => typeof m.enable === 'boolean',
+  'emotion:model-cancel': () => true,
+  'emotion:model-remove': () => true,
+  'emotion:model-enable': (m) => typeof m.enabled === 'boolean',
+  'emotion:model-self-test': () => true,
+  'emotion:model-deactivate': () => true,
+  'emotion:model-state': (m) => isEmotionModelInstallState(m.state),
   'user:frame': (m) => isUserVoiceFrame(m.frame),
   'user:status': (m) => isMicStatus(m.status),
   'extension:error': (m) => typeof m.error === 'string',
@@ -167,6 +194,15 @@ export function isEmotionStatus(raw: unknown): raw is EmotionStatus {
     s.inferences >= 0 &&
     (s.error === undefined || typeof s.error === 'string')
   );
+}
+
+export function isEmotionModelInstallState(raw: unknown): raw is EmotionModelInstallState {
+  if (!raw || typeof raw !== 'object') return false;
+  const s = raw as Record<string, unknown>;
+  return ['not-installed', 'downloading', 'verifying', 'initializing', 'ready', 'disabled', 'error'].includes(s.status as string) &&
+    (s.downloaded === undefined || (typeof s.downloaded === 'number' && s.downloaded >= 0)) &&
+    (s.error === undefined || typeof s.error === 'string') &&
+    (s.installed === undefined || typeof s.installed === 'boolean') && (s.enabled === undefined || typeof s.enabled === 'boolean');
 }
 
 /**

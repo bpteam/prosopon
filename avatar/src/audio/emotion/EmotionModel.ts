@@ -12,6 +12,8 @@ export type ModelBackend = 'webgpu' | 'wasm';
 export interface EmotionModelSpec {
   /** URL of the .onnx file (packaged or local). Nothing is fetched from the network by default. */
   url: string;
+  /** Local model bytes, used by extension binary storage. Takes precedence over url. */
+  data?: ArrayBuffer;
   /** Rate the model expects, Hz. The audio is fed at this rate. */
   sampleRate: number;
   /** Audio per inference, seconds. */
@@ -20,6 +22,8 @@ export interface EmotionModelSpec {
   inputName?: string;
   /** Output tensor name; the model's first output when omitted. */
   outputName?: string;
+  /** Separate named outputs for arousal and valence regressors. */
+  outputNames?: { arousal: string; valence: string };
   arousalIndex: number;
   valenceIndex: number;
   /** Range of the raw outputs; mapped linearly to arousal [0, 1] and valence [−1, 1]. */
