@@ -213,4 +213,11 @@ canvas.spark { display: block; width: 100%; background: rgba(255,255,255,.025); 
 .toolbar .sep { width: 1px; height: 22px; background: var(--border-strong); margin: 0 4px; }
 .toolbar .scale { min-width: 46px; text-align: center; font: 600 13px/1 var(--font); font-variant-numeric: tabular-nums; }
 .note { font-size: 12px; color: var(--text-secondary); margin: 0; }
+.sem-list { display: flex; flex-direction: column; gap: var(--gap-s); max-height: 360px; overflow-y: auto; }
+.sem-entry { display: flex; flex-direction: column; gap: 3px; padding: 6px 8px; border-radius: 6px; background: rgba(255,255,255,.03); border-left: 2px solid var(--border-strong); }
+.sem-entry.accepted { border-left-color: var(--yellow); }
+.sem-text { font-size: 12px; color: var(--text); }
+.sem-entry .mono { font-family: ui-monospace, monospace; white-space: pre-wrap; color: var(--text-secondary); }
+.sem-verdict { color: var(--text-secondary); }
+.sem-entry.accepted .sem-verdict { color: var(--yellow); }
 `;

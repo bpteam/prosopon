@@ -129,3 +129,67 @@ describe('ChatGPTAdapter', () => {
     expect(orb.hasAttribute('data-prosopon-hidden')).toBe(false);
   });
 });
+
+describe('ChatGPTAdapter: assistant reply text (semantic layer input)', () => {
+  const reply = (html: string, id?: string): HTMLElement => {
+    const m = document.createElement('div');
+    m.dataset.messageAuthorRole = 'assistant';
+    if (id) m.dataset.messageId = id;
+    m.innerHTML = `<div class="markdown prose">${html}</div><button>Copy</button>`;
+    document.body.append(m);
+    return m;
+  };
+
+  it('no reply → null', () => {
+    expect(new ChatGPTAdapter(document).readLatestReply()).toBeNull();
+  });
+
+  it('reads the latest assistant message, not the user’s, as light Markdown', () => {
+    const user = document.createElement('div');
+    user.dataset.messageAuthorRole = 'user';
+    user.textContent = 'Но почему?';
+    document.body.append(user);
+    reply('<p>Old.</p>', 'a1');
+    reply(
+      '<h3>Итог</h3><p>Есть <strong>три</strong> варианта:</p><ol><li><p>Первый</p></li><li>Второй</li></ol>' +
+        '<ul><li>пункт</li></ul><pre><code>if (a) { but(); }</code></pre><p>Используй <code>npm i</code>, <em>но</em> осторожно.</p>',
+      'a2',
+    );
+    const r = new ChatGPTAdapter(document).readLatestReply()!;
+    expect(r.id).toBe('a2');
+    expect(r.text).toBe('### Итог\n\nЕсть **три** варианта:\n\n1. Первый\n2. Второй\n- пункт\n\n```\n```\n\nИспользуй `npm i`, *но* осторожно.');
+    expect(r.text).not.toMatch(/Copy|but\(\)/);
+  });
+
+  it('ordered lists honour start; hidden and aria-hidden nodes are skipped', () => {
+    reply('<ol start="3"><li>c</li><li>d</li></ol><span aria-hidden="true">x</span><p hidden>y</p>');
+    expect(new ChatGPTAdapter(document).readLatestReply()!.text).toBe('3. c\n4. d');
+  });
+
+  it('a message without data-message-id keeps one stable id across reads', () => {
+    const m = reply('<p>Да.</p>');
+    const adapter = new ChatGPTAdapter(document);
+    const a = adapter.readLatestReply()!;
+    m.querySelector('p')!.textContent = 'Да, но есть нюанс.';
+    const b = adapter.readLatestReply()!;
+    expect(b.id).toBe(a.id);
+    expect(b.text).toBe('Да, но есть нюанс.');
+    reply('<p>Next.</p>');
+    expect(adapter.readLatestReply()!.id).not.toBe(a.id);
+  });
+
+  it('observeReplies fires on streaming text changes and stops on dispose', async () => {
+    const m = reply('<p>Н</p>');
+    const adapter = new ChatGPTAdapter(document);
+    const onChange = vi.fn();
+    const stop = adapter.observeReplies(onChange);
+    m.querySelector('p')!.firstChild!.textContent = 'Но';
+    await flush();
+    expect(onChange).toHaveBeenCalled();
+    stop();
+    onChange.mockClear();
+    m.querySelector('p')!.append(' есть нюанс.');
+    await flush();
+    expect(onChange).not.toHaveBeenCalled();
+  });
+});

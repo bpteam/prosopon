@@ -242,7 +242,9 @@ describe('prosody/emotion analyser', () => {
     expect(runtime.match(/new ProsodyChannel\(/g)).toHaveLength(2); // user, and assistant per capture session
   });
 
-  it('no speech-to-text, transcripts or text analysis anywhere', () => {
+  // Text analysis exists only as the rule-based semantic layer over the reply's visible text (below); there is no
+  // speech-to-text, transcript or NLP/ML text package anywhere.
+  it('no speech-to-text, transcripts or NLP packages anywhere', () => {
     const pkgs = [resolve(EXT, 'package.json'), resolve(AVATAR_SRC, '../package.json')].map((f) => readFileSync(f, 'utf8'));
     for (const p of pkgs) expect(p).not.toMatch(/whisper|transformers|speech-to-text|vosk|deepgram|sentiment|openai/i);
     const { packages } = graph(resolve(EXT, 'src/offscreen/audio-runtime.ts'));
@@ -252,6 +254,31 @@ describe('prosody/emotion analyser', () => {
         expect(code(join(dir, f)), f).not.toMatch(/SpeechRecognition|transcri(pt|be)/i);
       }
     }
+  });
+});
+
+describe('semantic layer', () => {
+  it('is local rules only: the semantic analyzer reaches no package at all', () => {
+    for (const entry of ['SemanticAnalyzer.ts', 'SemanticPacer.ts']) {
+      const { files, packages } = graph(resolve(AVATAR_SRC, 'semantic', entry));
+      expect([...packages], entry).toEqual([]);
+      expect(rel(files).filter((f) => !f.startsWith('avatar/src/semantic/')), entry).toEqual([]);
+    }
+  });
+
+  it('SemanticFeed reads replies only through the adapter: no DOM, no selectors, no avatar or renderer', () => {
+    const feed = readFileSync(resolve(EXT, 'src/content/SemanticFeed.ts'), 'utf8');
+    expect(feed).not.toMatch(/\b(document|window|querySelector|MutationObserver|HTMLElement|textContent|innerText)\b/);
+    const { files, packages } = graph(resolve(EXT, 'src/content/SemanticFeed.ts'));
+    expect([...packages]).toEqual([]);
+    expect(rel(files).filter((f) => /three|Avatar(Controller)?\.ts|BehaviorMixer|renderer\//.test(f))).toEqual([]);
+  });
+
+  it('semantic intents reach the avatar only through GestureEngine.pushSemantic', () => {
+    const runtime = readFileSync(resolve(EXT, 'src/content/avatar-runtime.ts'), 'utf8');
+    expect(runtime).toMatch(/sink:\s*\(?\w*\)?\s*=>\s*\w+\.pushSemantic\(/);
+    const files = readdirSync(resolve(EXT, 'src'), { recursive: true }).map(String).filter((f) => f.endsWith('.ts'));
+    for (const f of files) expect(readFileSync(resolve(EXT, 'src', f), 'utf8'), f).not.toMatch(/\.semantic\.decide\(|new SemanticGesturePolicy/);
   });
 });
 

@@ -3,7 +3,7 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
-/** US-008 boundaries, checked on the sources. */
+/** Gesture and semantic-layer boundaries, checked on the sources. */
 
 const SRC = resolve(dirname(fileURLToPath(import.meta.url)), '../../src');
 
@@ -28,7 +28,13 @@ describe('GestureEngine and gesture contracts', () => {
   const gesture = all.filter((f) => rel(f).startsWith('avatar/gesture/'));
 
   it('exist', () => {
-    expect(gesture.map(rel).sort()).toEqual(['avatar/gesture/Gesture.ts', 'avatar/gesture/GestureConfig.ts', 'avatar/gesture/GestureEngine.ts']);
+    expect(gesture.map(rel).sort()).toEqual([
+      'avatar/gesture/Gesture.ts',
+      'avatar/gesture/GestureConfig.ts',
+      'avatar/gesture/GestureEngine.ts',
+      'avatar/gesture/SemanticGestureConfig.ts',
+      'avatar/gesture/SemanticGesturePolicy.ts',
+    ]);
   });
 
   it('never import Avatar, AvatarController, three or three-vrm (not even as types)', () => {
@@ -69,3 +75,37 @@ describe('single writer of bones', () => {
     expect(readFileSync(join(SRC, 'avatar/UserReactionMapper.ts'), 'utf8')).not.toMatch(/this\.nod|nodCount|nods\b/);
   });
 });
+
+describe('semantic layer (text → cues) is renderer- and audio-free', () => {
+  const semantic = all.filter((f) => rel(f).startsWith('semantic/'));
+
+  it('exists', () => {
+    expect(semantic.map(rel)).toEqual(expect.arrayContaining(['semantic/SemanticAnalyzer.ts', 'semantic/SemanticCue.ts', 'semantic/SemanticMatcher.ts', 'semantic/SemanticPacer.ts']));
+  });
+
+  it('imports only itself: no avatar, renderer, audio, debug, three or VRM (not even as types)', () => {
+    const bad = semantic.flatMap((f) =>
+      imports(f)
+        .filter((s) => !s.startsWith('./') && !s.startsWith('../') ? true : /\/(avatar|renderer|audio|debug)\//.test(s) || /^\.\.\/(avatar|renderer|audio|debug)\b/.test(s) || /^\.\.\/\.\./.test(s))
+        .map((s) => `${rel(f)} → ${s}`),
+    );
+    expect(bad).toEqual([]);
+  });
+
+  it('touches no DOM, audio API, bones, expressions or procedural pose', () => {
+    const API = /\b(?:document|window|navigator|MutationObserver|HTMLElement|AudioContext|AnalyserNode|MediaStream|requestAnimationFrame|setTimeout|setInterval)\b|setProcedural|setExpression|getNormalizedBoneNode|expressionManager|fetch\(/;
+    const bad = semantic.filter((f) => API.test(readFileSync(f, 'utf8').replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '')));
+    expect(bad.map(rel)).toEqual([]);
+  });
+
+  it('the gesture side reads cues only through SemanticCue (no vocabulary, matcher or analyzer)', () => {
+    const bad = gestureSemanticImports();
+    expect(bad).toEqual([]);
+  });
+});
+
+function gestureSemanticImports(): string[] {
+  return all
+    .filter((f) => rel(f).startsWith('avatar/'))
+    .flatMap((f) => imports(f).filter((s) => /semantic\/(?!SemanticCue$)/.test(s)).map((s) => `${rel(f)} → ${s}`));
+}

@@ -3,7 +3,11 @@
 import type { EmotionFrame } from '../../audio/emotion/EmotionFrame';
 import type { AvatarState } from '../AvatarStateProfiles';
 
-export const GESTURE_TYPES = ['nod', 'double-nod', 'head-tilt', 'body-shift', 'shoulder-shift', 'hand-emphasis'] as const;
+/**
+ * `head-shake` (one small yaw oscillation) and `lean-in` exist for semantic performance (correction, conclusion):
+ * the prosody scheduler never picks them (rate 0), only semantic intents and manual triggers do.
+ */
+export const GESTURE_TYPES = ['nod', 'double-nod', 'head-tilt', 'body-shift', 'shoulder-shift', 'hand-emphasis', 'head-shake', 'lean-in'] as const;
 export type GestureType = (typeof GESTURE_TYPES)[number];
 
 export function isGestureType(value: unknown): value is GestureType {
@@ -103,7 +107,7 @@ export interface GestureContext {
   lastUtteranceDuration: number;
 }
 
-/** Procedural (or, later, semantic) source of gestures. Only BehaviorMixer turns its output into a pose. */
+/** Source of gestures (procedural and semantic). Only BehaviorMixer turns its output into a pose. */
 export interface GestureSource {
   update(deltaTime: number, context: Readonly<GestureContext>): Readonly<GestureFrame>;
   /** Graceful: a short release from the current offsets, never a snap to rest. */

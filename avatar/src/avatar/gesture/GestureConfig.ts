@@ -144,12 +144,16 @@ export const GESTURE_CONFIG: Readonly<GestureConfig> = {
     'body-shift': type({ duration: [2, 3.2], cooldown: [3, 6], attack: 0.35, hold: 0.3, bodyYaw: 0.05, bodyLean: 0.02, bodyRoll: 0.015, headYaw: -0.02 }),
     'shoulder-shift': type({ duration: [1.2, 1.8], cooldown: [2.5, 5], attack: 0.35, hold: 0.2, shoulder: 0.07, shoulderCounter: 0.3, bodyRoll: 0.012, headRoll: -0.012 }),
     'hand-emphasis': type({ duration: [0.9, 1.3], cooldown: [3, 6], attack: 0.3, hold: 0.3, armForward: 0.28, armOutward: 0.12, elbowBend: 0.35, shoulder: 0.02 }),
+    // One yaw swing each way (~2° at intensity 1), never a repeated shake; see GestureEngine.curve.
+    'head-shake': type({ duration: [0.55, 0.75], cooldown: [2, 4], headYaw: 0.035, headPitch: 0.008 }),
+    // Towards the camera with the chin slightly down: a settling "so, here's the point".
+    'lean-in': type({ duration: [1.4, 2], cooldown: [3, 5], attack: 0.35, hold: 0.3, bodyLean: 0.035, headPitch: 0.025 }),
   },
   rates: {
-    idle: { nod: 0, 'double-nod': 0, 'head-tilt': 0.02, 'body-shift': 0.03, 'shoulder-shift': 0.015, 'hand-emphasis': 0 },
-    listening: { nod: 0.02, 'double-nod': 0, 'head-tilt': 0.04, 'body-shift': 0.02, 'shoulder-shift': 0, 'hand-emphasis': 0 },
-    thinking: { nod: 0, 'double-nod': 0, 'head-tilt': 0.04, 'body-shift': 0.015, 'shoulder-shift': 0, 'hand-emphasis': 0 },
-    speaking: { nod: 0.04, 'double-nod': 0, 'head-tilt': 0.03, 'body-shift': 0.04, 'shoulder-shift': 0.03, 'hand-emphasis': 0.1 },
+    idle: { nod: 0, 'double-nod': 0, 'head-tilt': 0.02, 'body-shift': 0.03, 'shoulder-shift': 0.015, 'hand-emphasis': 0, 'head-shake': 0, 'lean-in': 0 },
+    listening: { nod: 0.02, 'double-nod': 0, 'head-tilt': 0.04, 'body-shift': 0.02, 'shoulder-shift': 0, 'hand-emphasis': 0, 'head-shake': 0, 'lean-in': 0 },
+    thinking: { nod: 0, 'double-nod': 0, 'head-tilt': 0.04, 'body-shift': 0.015, 'shoulder-shift': 0, 'hand-emphasis': 0, 'head-shake': 0, 'lean-in': 0 },
+    speaking: { nod: 0.04, 'double-nod': 0, 'head-tilt': 0.03, 'body-shift': 0.04, 'shoulder-shift': 0.03, 'hand-emphasis': 0.1, 'head-shake': 0, 'lean-in': 0 },
   },
   intensity: [0.45, 0.9],
   forcedIntensity: 0.8,
