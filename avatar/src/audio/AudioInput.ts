@@ -1,4 +1,4 @@
-export type AudioInputKind = 'none' | 'file' | 'mic' | 'test' | 'node';
+export type AudioInputKind = 'none' | 'file' | 'mic' | 'test' | 'node' | 'stream';
 
 export interface AudioInputOptions {
   /** Analysis window in samples (power of two). 1024 ≈ 21 ms at 48 kHz. */
@@ -12,7 +12,8 @@ export interface AudioInputOptions {
  * and a pull-style readRms() that the render loop calls once per frame.
  *
  * Routing: file and test signal → analyser → speakers; mic → analyser only (no monitoring, no feedback);
- * external node → analyser only (the caller decides whether it is audible).
+ * external node → analyser only (the caller decides whether it is audible); media stream → analyser, and to the
+ * speakers when `monitor` is set.
  *
  * The AudioContext is created on the first start*() call, which should come from a user gesture
  * (autoplay policy).
@@ -157,6 +158,45 @@ export class AudioInput {
   }
 
   /**
+   * Analyse a MediaStream that is already open (tab capture, WebRTC). The stream is owned by the caller: stop()
+   * disconnects it but doesn't stop its tracks.
+   *
+   * `monitor` also plays the stream through the speakers, for captures that take the audio away from where it
+   * was playing (chrome.tabCapture mutes the tab). `monitorDelay` (seconds) delays only what is heard, which can
+   * compensate the analysis latency of lip sync at the cost of the same delay in playback.
+   */
+  async attachMediaStream(stream: MediaStream, options: MediaStreamOptions = {}): Promise<void> {
+    const ctx = await this.begin();
+    if (stream.getAudioTracks().length === 0) {
+      this.stop();
+      throw new Error('[AudioInput] media stream has no audio track');
+    }
+    const node = ctx.createMediaStreamSource(stream);
+    node.connect(this.analyser!);
+    let monitor: AudioNode | null = null;
+    if (options.monitor) {
+      const delay = Math.max(0, options.monitorDelay ?? 0);
+      if (delay > 0) {
+        const delayNode = ctx.createDelay(Math.max(1, delay));
+        delayNode.delayTime.value = delay;
+        node.connect(delayNode).connect(ctx.destination);
+        monitor = delayNode;
+      } else {
+        node.connect(ctx.destination);
+      }
+    }
+    const onEnded = () => this.stop();
+    const tracks = stream.getAudioTracks();
+    // The capture ends on its own when the tab closes or the user stops it from the browser UI.
+    for (const track of tracks) track.addEventListener('ended', onEnded);
+    this.activate('stream', () => {
+      for (const track of tracks) track.removeEventListener('ended', onEnded);
+      node.disconnect();
+      monitor?.disconnect();
+    });
+  }
+
+  /**
    * Analyse an arbitrary node from the same AudioContext (a TTS player, a WebRTC stream).
    * Only taps the node: its own routing is untouched.
    */
@@ -245,6 +285,13 @@ export class AudioInput {
     this.currentKind = kind;
     for (const listener of [...this.listeners]) listener(kind);
   }
+}
+
+export interface MediaStreamOptions {
+  /** Also play the stream through the speakers. Default false. */
+  monitor?: boolean;
+  /** Delay of the monitored signal, seconds. Default 0. */
+  monitorDelay?: number;
 }
 
 /** A start*() call was overtaken by a newer start*() or stop() before it produced audio. */

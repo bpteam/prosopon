@@ -74,12 +74,16 @@ Frame order: `delta → controller.update(delta) → renderer.render()`, where `
 Chrome Extension APIs or audio.
 
 ```ts
-const controller = new AvatarController({ avatar, idle });
+const controller = new AvatarController({ idle });   // no avatar needed yet
+controller.setState('speaking');                     // kept while the VRM loads
+controller.attachAvatar(avatar);                     // picks up the current state on its first frame
 controller.onStateChange((state, previous) => { /* ... */ }); // returns unsubscribe
 controller.setState('listening'); // idle | listening | thinking | speaking
 controller.update(delta);
 ```
 
+- The controller runs (state machine, idle, mouth source) without an avatar; manual-layer calls return `false`/`0`
+  until one is attached. `new AvatarController({ avatar, idle })` still works.
 - Each state is an `AvatarStateProfile` in `AvatarStateProfiles.ts`: multipliers for the idle head/gaze/breath
   signal plus head/gaze/lean offsets. Profiles never touch expressions; conversation state is not emotion.
 - `setState` blends from the *current* (possibly mid-transition) profile to the target with a smoothstep over
@@ -180,9 +184,9 @@ Exception: a change to `AvatarLoader.ts` only affects the next full reload, beca
 ## Dev API
 
 In dev mode, `window.__AVATAR_DEBUG__ = { loaded, error, fps, avatar, idle, stage, controller, audio, lipSync, visemes, analyzers, state }`
-(`state` is a live getter; `controller`/`state` are `null` until the model is loaded). `<body data-avatar-loaded>`
-is `false` → `true`, or `error` (with `data-avatar-error`) if loading fails. `<body data-avatar-state>` mirrors
-the conversation state once the avatar is loaded. Load errors also go to
+(`state` is a live getter; `controller` and `state` exist before the model is loaded, `avatar` is `null` until then).
+`<body data-avatar-loaded>` is `false` → `true`, or `error` (with `data-avatar-error`) if loading fails.
+`<body data-avatar-state>` mirrors the conversation state from the start. Load errors also go to
 `console.error` and show a banner on the page.
 
 ## Model

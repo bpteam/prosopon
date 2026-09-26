@@ -1,5 +1,5 @@
 import type GUI from 'lil-gui';
-import { VISEMES } from '../avatar/Avatar';
+import { VISEMES } from '../avatar/MouthShape';
 import type { AnalyzerChoice, VisemeAnalyzerHost } from './VisemeAnalyzerHost';
 import type { VisemeLipSync } from './VisemeLipSync';
 

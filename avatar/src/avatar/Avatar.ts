@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { VRMHumanBoneName } from '@pixiv/three-vrm';
+import { CLOSED_MOUTH, VISEMES, type MouthShape, type Viseme } from './MouthShape';
 
 export type HumanBoneName = VRMHumanBoneName;
 
@@ -31,14 +32,7 @@ export interface AvatarRuntime {
   update(delta: number): void;
 }
 
-/** VRM 1.0 mouth presets driven by lip sync. */
-export const VISEMES = ['aa', 'ih', 'ou', 'ee', 'oh'] as const;
-export type Viseme = (typeof VISEMES)[number];
-
-/** Weight per viseme preset, [0, 1] each. */
-export type MouthShape = Record<Viseme, number>;
-
-export const CLOSED_MOUTH: Readonly<MouthShape> = Object.freeze({ aa: 0, ih: 0, ou: 0, ee: 0, oh: 0 });
+export { CLOSED_MOUTH, VISEMES, type MouthShape, type Viseme } from './MouthShape';
 
 const VISEME_SET: ReadonlySet<string> = new Set(VISEMES);
 

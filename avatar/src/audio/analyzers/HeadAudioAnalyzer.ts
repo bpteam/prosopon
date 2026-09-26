@@ -1,4 +1,4 @@
-import type { MouthShape } from '../../avatar/Avatar';
+import type { MouthShape } from '../../avatar/MouthShape';
 import { assertAudioWorklet, writeShape, type VisemeAnalyzer, type VisemeAnalyzerFactory } from '../VisemeAnalyzer';
 
 /**

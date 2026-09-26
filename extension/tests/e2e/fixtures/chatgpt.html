@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>ChatGPT (fixture)</title>
+    <style>
+      body { margin: 0; font: 14px system-ui, sans-serif; background: #fff; }
+      #app { min-height: 100vh; display: flex; flex-direction: column; }
+      #thread { flex: 1; padding: 16px; }
+      [data-testid='voice-mode-container'] {
+        position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: #fafafa;
+      }
+      [data-testid='voice-orb'] { width: 180px; height: 180px; border-radius: 50%; background: #4a8cff; }
+      #close-voice { position: absolute; bottom: 32px; }
+      /* Hostile page styles: must not reach the overlay. */
+      div { box-sizing: content-box; }
+      canvas { border: 10px solid red !important; opacity: 0.1 !important; }
+    </style>
+  </head>
+  <body>
+    <!-- Mimics the parts of chatgpt.com that ChatGPTAdapter knows; see CHATGPT_SELECTORS. -->
+    <div id="app">
+      <div id="thread"><p>Fixture conversation</p></div>
+      <form id="composer"><textarea aria-label="Message"></textarea><button type="button" id="open-voice">Voice</button></form>
+    </div>
+    <script>
+      const app = document.getElementById('app');
+      let speech = null;
+      window.fixture = {
+        openVoice() {
+          if (document.querySelector('[data-testid="voice-mode-container"]')) return;
+          const container = document.createElement('div');
+          container.dataset.testid = 'voice-mode-container';
+          const orb = document.createElement('div');
+          orb.dataset.testid = 'voice-orb';
+          const close = document.createElement('button');
+          close.id = 'close-voice';
+          close.textContent = 'End';
+          close.onclick = () => window.fixture.closeVoice();
+          container.append(orb, close);
+          app.append(container);
+        },
+        closeVoice() {
+          document.querySelector('[data-testid="voice-mode-container"]')?.remove();
+        },
+        /** React-like churn: many unrelated mutations. */
+        churn(n) {
+          const thread = document.getElementById('thread');
+          for (let i = 0; i < n; i++) {
+            const p = document.createElement('p');
+            p.textContent = `token ${i}`;
+            thread.append(p);
+            if (i % 3 === 0) p.remove();
+          }
+        },
+        /** SPA navigation: pushState + re-render of the app shell. */
+        navigate(path) {
+          history.pushState({}, '', path);
+          document.getElementById('thread').innerHTML = `<p>${path}</p>`;
+        },
+        /** Speech-like test signal (buzz with syllable-rate envelope), played by the page like ChatGPT's voice. */
+        playSpeech() {
+          if (speech) return;
+          const ctx = new AudioContext();
+          const osc = ctx.createOscillator();
+          osc.type = 'sawtooth';
+          osc.frequency.value = 140;
+          const lowpass = ctx.createBiquadFilter();
+          lowpass.type = 'lowpass';
+          lowpass.frequency.value = 1400;
+          const env = ctx.createGain();
+          env.gain.value = 0;
+          osc.connect(lowpass).connect(env).connect(ctx.destination);
+          const t0 = ctx.currentTime + 0.05;
+          for (let i = 0; i < 200; i++) {
+            const t = t0 + i * 0.2;
+            env.gain.setValueAtTime(0.02, t);
+            env.gain.linearRampToValueAtTime(0.5, t + 0.06);
+            env.gain.linearRampToValueAtTime(0.02, t + 0.18);
+          }
+          osc.start();
+          speech = { ctx };
+        },
+        stopSpeech() {
+          speech?.ctx.close();
+          speech = null;
+        },
+      };
+    </script>
+  </body>
+</html>

@@ -347,3 +347,40 @@ describe('manual proxies', () => {
     expect(p.lean).toBeCloseTo(STATE_PROFILES.listening.leanOffset, 9);
   });
 });
+
+describe('avatar attached after construction (model still loading)', () => {
+  it('keeps state set before the avatar exists and applies it once attached', () => {
+    const controller = new AvatarController({ idle: makeIdle() });
+    expect(controller.avatar).toBeNull();
+    const seen: string[] = [];
+    controller.onStateChange((s) => seen.push(s));
+
+    controller.setState('speaking');
+    run(controller, 1, 1 / 60); // frames before the VRM arrives must not throw
+    expect(seen).toEqual(['speaking']);
+    expect(controller.setExpression('happy', 1)).toBe(false);
+
+    const vrm = createFakeVrm();
+    const avatar = new Avatar(vrm, { logger: silentLogger() });
+    controller.attachAvatar(avatar);
+    expect(controller.avatar).toBe(avatar);
+    expect(controller.getState()).toBe('speaking');
+    expect(controller.isTransitioning).toBe(false);
+    expectProfile(controller.stateProfile, STATE_PROFILES.speaking);
+
+    controller.setMouthSource({ update: () => 0.5 });
+    controller.update(1 / 60);
+    expect(vrm.values.get('aa')).toBeCloseTo(0.5);
+    expect(vrm.updates.length).toBeGreaterThan(0);
+  });
+
+  it('applies a look-at target set before the avatar is attached', () => {
+    const controller = new AvatarController({ idle: makeIdle() });
+    const target = new THREE.Object3D();
+    controller.setLookAtTarget(target);
+    const vrm = createFakeVrm();
+    controller.attachAvatar(new Avatar(vrm, { logger: silentLogger() }));
+    controller.update(1 / 60);
+    expect(vrm.lookAt.target).not.toBeNull();
+  });
+});

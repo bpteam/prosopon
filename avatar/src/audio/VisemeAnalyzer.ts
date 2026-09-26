@@ -1,4 +1,4 @@
-import type { MouthShape } from '../avatar/Avatar';
+import type { MouthShape } from '../avatar/MouthShape';
 
 /**
  * A real-time speech analyser that tells which mouth shape is being pronounced.
